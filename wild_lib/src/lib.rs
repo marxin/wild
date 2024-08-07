@@ -1,6 +1,14 @@
-#![allow(clippy::needless_update)]
-#![allow(clippy::match_like_matches_macro)]
+// It's not always desirable to use if-let instead of a match, especially if you might later end up
+// adding more branches to the match.
 #![allow(clippy::single_match)]
+// Sure, less arguments is good, but it's a trade-off. Sometimes you have a complex function that
+// you'd like to split by extracting part of it out into a new function. That new function might
+// have lots of arguments. It might be possible to group some of those arguments together into some
+// new struct, but not always. Given the choice between a function that's too large and does too
+// much vs a function that has too many arguments, it's sometimes best to pick the latter.
+// Especially since that function is generally only ever called from one place and the arguments all
+// have distinct types.
+#![allow(clippy::too_many_arguments)]
 
 use args::Args;
 
@@ -84,9 +92,8 @@ fn link(args: &Args) -> crate::error::Result {
     let files = parsing::parse_input_files(&inputs, args)?;
     let mut symbol_db =
         symbol_db::SymbolDb::build(&files, input_data.version_script_data.as_ref(), args)?;
-    let (resolved_files, output_sections) =
-        resolution::resolve_symbols_and_sections(&files, &mut symbol_db)?;
-    let layout = layout::compute(&symbol_db, resolved_files, output_sections, &mut output)?;
+    let resolved = resolution::resolve_symbols_and_sections(&files, &mut symbol_db)?;
+    let layout = layout::compute(&symbol_db, resolved, &mut output)?;
     let output_file = output.write(&layout)?;
     diff::maybe_diff()?;
 
