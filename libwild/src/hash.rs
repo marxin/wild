@@ -40,7 +40,7 @@ pub(crate) fn hash_bytes(bytes: &[u8]) -> u64 {
 
 #[derive(Eq, Clone, Copy)]
 pub(crate) struct PreHashed<T> {
-    value: T,
+    pub(crate) value: T,
     hash: u64,
 }
 

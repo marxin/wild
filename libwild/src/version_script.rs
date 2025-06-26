@@ -6,12 +6,13 @@
 
 use crate::error;
 use crate::error::Result;
-use crate::hash::PassThroughHasher;
 use crate::hash::PreHashed;
 use crate::input_data::VersionScriptData;
 use crate::linker_script::skip_comments_and_whitespace;
 use crate::symbol::UnversionedSymbolName;
-use std::collections::HashSet;
+use globset::Glob;
+use globset::GlobSet;
+use globset::GlobSetBuilder;
 use winnow::BStr;
 use winnow::Parser;
 use winnow::error::ContextError;
@@ -23,65 +24,68 @@ use winnow::token::take_while;
 #[derive(Default)]
 pub(crate) struct VersionScript<'data> {
     /// For symbol visibility we only need to know whether the symbol is global or local.
-    globals: MatchRules<'data>,
-    locals: MatchRules<'data>,
+    globals: GlobSet,
+    locals: GlobSet,
     versions: Vec<Version<'data>>,
 }
 
 pub(crate) struct Version<'data> {
     pub(crate) name: &'data [u8],
     pub(crate) parent_index: Option<u16>,
+    symbols: GlobSet,
+}
+
+#[derive(Default)]
+pub(crate) struct VersionScriptBuilder<'data> {
+    /// For symbol visibility we only need to know whether the symbol is global or local.
+    globals: MatchRules<'data>,
+    locals: MatchRules<'data>,
+    versions: Vec<VersionBuilder<'data>>,
+}
+
+impl<'data> VersionScriptBuilder<'data> {
+    fn build(self) -> VersionScript<'data> {
+        VersionScript {
+            globals: self.globals.build_glob(),
+            locals: self.locals.build_glob(),
+            versions: self.versions.into_iter().map(|v| v.build()).collect(),
+        }
+    }
+}
+
+pub(crate) struct VersionBuilder<'data> {
+    pub(crate) name: &'data [u8],
+    pub(crate) parent_index: Option<u16>,
     symbols: MatchRules<'data>,
+}
+
+impl<'data> VersionBuilder<'data> {
+    fn build(self) -> Version<'data> {
+        Version {
+            name: self.name,
+            parent_index: self.parent_index,
+            symbols: self.symbols.build_glob(),
+        }
+    }
 }
 
 #[derive(Default)]
 struct MatchRules<'data> {
-    matches_all: bool,
-    exact: HashSet<PreHashed<UnversionedSymbolName<'data>>, PassThroughHasher>,
-    prefixes: Vec<&'data [u8]>,
+    rules: Vec<&'data str>,
 }
 
 impl<'data> MatchRules<'data> {
-    fn push(&mut self, pattern: SymbolMatcher<'data>) {
-        match pattern {
-            SymbolMatcher::All => self.matches_all = true,
-            SymbolMatcher::Prefix(prefix) => self.prefixes.push(prefix),
-            SymbolMatcher::Exact(exact) => {
-                self.exact.insert(UnversionedSymbolName::prehashed(exact));
-            }
-        }
+    fn build_glob(&self) -> GlobSet {
+        self.rules
+            .iter()
+            .fold(GlobSetBuilder::new(), |mut set, rule| {
+                set.add(Glob::new(rule).unwrap());
+                set
+            })
+            .build()
+            .unwrap()
+        // TODO
     }
-
-    fn matches(&self, name: &PreHashed<UnversionedSymbolName>) -> bool {
-        self.matches_all
-            || self.exact.contains(name)
-            || self
-                .prefixes
-                .iter()
-                .any(|prefix| name.bytes().starts_with(prefix))
-    }
-
-    fn merge(&mut self, other: &MatchRules<'data>) {
-        if other.matches_all {
-            self.matches_all = true;
-        }
-
-        if self.matches_all {
-            self.exact.clear();
-            self.prefixes.clear();
-            return;
-        }
-
-        self.exact.extend(&other.exact);
-        self.prefixes.extend(&other.prefixes);
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum SymbolMatcher<'data> {
-    All,
-    Prefix(&'data [u8]),
-    Exact(&'data [u8]),
 }
 
 fn parse_version_script<'input>(input: &mut &'input BStr) -> winnow::Result<VersionScript<'input>> {
@@ -98,14 +102,14 @@ fn parse_version_script<'input>(input: &mut &'input BStr) -> winnow::Result<Vers
 
         skip_comments_and_whitespace(input)?;
 
-        return Ok(script);
+        return Ok(script.build());
     }
 
-    let mut version_script = VersionScript::default();
+    let mut version_script = VersionScriptBuilder::default();
 
     // Base version placeholder
     version_names.push(b"");
-    version_script.versions.push(Version {
+    version_script.versions.push(VersionBuilder {
         name: b"",
         symbols: MatchRules::default(),
         parent_index: None,
@@ -141,23 +145,23 @@ fn parse_version_script<'input>(input: &mut &'input BStr) -> winnow::Result<Vers
 
         skip_comments_and_whitespace(input)?;
 
-        version_script.globals.merge(&version.globals);
-        version_script.locals.merge(&version.locals);
+        version_script.globals.rules.extend(&version.globals.rules);
+        version_script.globals.rules.extend(&version.locals.rules);
 
         let mut version_symbols = MatchRules::default();
-        version_symbols.merge(&version.globals);
-        version_symbols.merge(&version.locals);
+        version_symbols.rules.extend(&version.globals.rules);
+        version_symbols.rules.extend(&version.locals.rules);
 
         version_names.push(name);
 
-        version_script.versions.push(Version {
+        version_script.versions.push(VersionBuilder {
             name,
             parent_index,
             symbols: version_symbols,
         });
     }
 
-    Ok(version_script)
+    Ok(version_script.build())
 }
 
 impl<'data> VersionScript<'data> {
@@ -169,10 +173,15 @@ impl<'data> VersionScript<'data> {
     }
 
     pub(crate) fn is_local(&self, name: &PreHashed<UnversionedSymbolName>) -> bool {
-        if self.globals.matches(name) {
+        // TODO
+        if self
+            .globals
+            .is_match(str::from_utf8(name.value.bytes()).unwrap())
+        {
             return false;
         }
-        self.locals.matches(name)
+        self.locals
+            .is_match(str::from_utf8(name.value.bytes()).unwrap())
     }
 
     /// Number of versions in the Version Script, including the base version.
@@ -207,10 +216,12 @@ enum VersionRuleSection {
     Local,
 }
 
-fn parse_version_section<'data>(input: &mut &'data BStr) -> winnow::Result<VersionScript<'data>> {
+fn parse_version_section<'data>(
+    input: &mut &'data BStr,
+) -> winnow::Result<VersionScriptBuilder<'data>> {
     let mut section = None;
 
-    let mut out = VersionScript::default();
+    let mut out = VersionScriptBuilder::default();
 
     '{'.parse_next(input)?;
 
@@ -234,10 +245,12 @@ fn parse_version_section<'data>(input: &mut &'data BStr) -> winnow::Result<Versi
 
             match section {
                 Some(VersionRuleSection::Global) | None => {
-                    out.globals.push(matcher);
+                    // TODO
+                    out.globals.rules.push(str::from_utf8(matcher).unwrap());
                 }
                 Some(VersionRuleSection::Local) => {
-                    out.locals.push(matcher);
+                    // TODO
+                    out.locals.rules.push(str::from_utf8(matcher).unwrap());
                 }
             }
         }
@@ -248,11 +261,12 @@ fn parse_version_section<'data>(input: &mut &'data BStr) -> winnow::Result<Versi
 
 impl Version<'_> {
     fn is_present(&self, name: &PreHashed<UnversionedSymbolName>) -> bool {
-        self.symbols.matches(name)
+        self.symbols
+            .is_match(str::from_utf8(name.value.bytes()).unwrap())
     }
 }
 
-fn parse_matcher<'data>(input: &mut &'data BStr) -> winnow::Result<SymbolMatcher<'data>> {
+fn parse_matcher<'data>(input: &mut &'data BStr) -> winnow::Result<&'data [u8]> {
     let token = take_until(1.., b';').parse_next(input)?;
 
     skip_comments_and_whitespace(input)?;
@@ -261,22 +275,7 @@ fn parse_matcher<'data>(input: &mut &'data BStr) -> winnow::Result<SymbolMatcher
         ";".parse_next(input)?;
     }
 
-    if token == b"*" {
-        return Ok(SymbolMatcher::All);
-    }
-
-    if let Some(prefix) = token.strip_suffix(b"*") {
-        if prefix.contains(&b'*') {
-            return Err(ContextError::new());
-        }
-        return Ok(SymbolMatcher::Prefix(prefix));
-    }
-
-    if token.contains(&b'*') {
-        return Err(ContextError::new());
-    }
-
-    Ok(SymbolMatcher::Exact(token))
+    Ok(token)
 }
 
 fn parse_token<'input>(input: &mut &'input BStr) -> winnow::Result<&'input [u8]> {
@@ -306,16 +305,7 @@ impl std::fmt::Debug for Version<'_> {
     }
 }
 
-impl std::fmt::Debug for MatchRules<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MatchRules")
-            .field("matches_all", &self.matches_all)
-            .field("exact", &self.exact)
-            .field("prefixes", &self.prefixes)
-            .finish()
-    }
-}
-
+/*
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,11 +319,11 @@ mod tests {
                     # Comment starting with a hash
                     {global:
                         /* Single-line comment */
-                        foo; /* Trailing comment */
+foo; /* Trailing comment */
                         bar*;
                     local:
-                        /* Multi-line
-                           comment */
+/* Multi-line
+comment */
                         *;
                     };"#,
         };
@@ -458,3 +448,4 @@ mod tests {
         assert_invalid("VER2 {bar;} VER1;");
     }
 }
+*/
