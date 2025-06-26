@@ -145,7 +145,7 @@ fn parse_version_script<'input>(input: &mut &'input BStr) -> winnow::Result<Vers
         skip_comments_and_whitespace(input)?;
 
         version_script.globals.rules.extend(&version.globals.rules);
-        version_script.globals.rules.extend(&version.locals.rules);
+        version_script.locals.rules.extend(&version.locals.rules);
 
         let mut version_symbols = MatchRules::default();
         version_symbols.rules.extend(&version.globals.rules);
