@@ -1253,7 +1253,9 @@ impl<'data> SymbolLoader<'data> for RegularObjectSymbolLoader<'_, 'data> {
     }
 
     fn should_downgrade_to_local(&self, name: &PreHashed<UnversionedSymbolName>) -> bool {
-        self.version_script.is_local(name)
+        // TODO
+        self.version_script
+            .is_local(str::from_utf8(name.bytes()).unwrap())
     }
 
     fn get_symbol_name_and_version(

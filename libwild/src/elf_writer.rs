@@ -73,7 +73,6 @@ use crate::sharding::ShardKey;
 use crate::slice::slice_take_prefix_mut;
 use crate::slice::take_first_mut;
 use crate::string_merging::get_merged_string_output_address;
-use crate::symbol::UnversionedSymbolName;
 use crate::symbol_db::SymbolDb;
 use crate::symbol_db::SymbolId;
 use foldhash::HashMap as FoldHashMap;
@@ -112,6 +111,7 @@ use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSliceMut;
 use std::fmt::Display;
 use std::io::Cursor;
+use std::io::Read;
 use std::io::Write;
 use std::iter;
 use std::marker::PhantomData;
@@ -2808,7 +2808,7 @@ fn write_dynamic_symbol_definitions(
                         let version = layout
                             .symbol_db
                             .version_script
-                            .version_for_symbol(&UnversionedSymbolName::prehashed(sym_def.name))
+                            .version_for_symbol(str::from_utf8(sym_def.name).unwrap())
                             .unwrap_or(object::elf::VER_NDX_GLOBAL);
                         version_out.0.set(LittleEndian, version);
                     }

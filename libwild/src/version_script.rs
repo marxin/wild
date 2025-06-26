@@ -35,7 +35,7 @@ pub(crate) struct Version<'data> {
     symbols: GlobSet,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub(crate) struct VersionScriptBuilder<'data> {
     /// For symbol visibility we only need to know whether the symbol is global or local.
     globals: MatchRules<'data>,
@@ -53,6 +53,7 @@ impl<'data> VersionScriptBuilder<'data> {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct VersionBuilder<'data> {
     pub(crate) name: &'data [u8],
     pub(crate) parent_index: Option<u16>,
@@ -69,7 +70,7 @@ impl<'data> VersionBuilder<'data> {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct MatchRules<'data> {
     rules: Vec<&'data str>,
 }
@@ -161,7 +162,7 @@ fn parse_version_script<'input>(input: &mut &'input BStr) -> winnow::Result<Vers
         });
     }
 
-    Ok(version_script.build())
+    Ok(dbg!(version_script).build())
 }
 
 impl<'data> VersionScript<'data> {
@@ -172,16 +173,12 @@ impl<'data> VersionScript<'data> {
             .map_err(|err| error!("Failed to parse version script:\n{err}"))
     }
 
-    pub(crate) fn is_local(&self, name: &PreHashed<UnversionedSymbolName>) -> bool {
+    pub(crate) fn is_local(&self, name: &str) -> bool {
         // TODO
-        if self
-            .globals
-            .is_match(str::from_utf8(name.value.bytes()).unwrap())
-        {
+        if self.globals.is_match(name) {
             return false;
         }
-        self.locals
-            .is_match(str::from_utf8(name.value.bytes()).unwrap())
+        self.locals.is_match(name)
     }
 
     /// Number of versions in the Version Script, including the base version.
@@ -200,10 +197,7 @@ impl<'data> VersionScript<'data> {
         self.versions.iter()
     }
 
-    pub(crate) fn version_for_symbol(
-        &self,
-        name: &PreHashed<UnversionedSymbolName>,
-    ) -> Option<u16> {
+    pub(crate) fn version_for_symbol(&self, name: &str) -> Option<u16> {
         self.versions.iter().enumerate().find_map(|(number, ver)| {
             ver.is_present(name)
                 .then(|| number as u16 + object::elf::VER_NDX_GLOBAL)
@@ -260,9 +254,9 @@ fn parse_version_section<'data>(
 }
 
 impl Version<'_> {
-    fn is_present(&self, name: &PreHashed<UnversionedSymbolName>) -> bool {
-        self.symbols
-            .is_match(str::from_utf8(name.value.bytes()).unwrap())
+    fn is_present(&self, name: &str) -> bool {
+        println!("{:?}", self.symbols);
+        dbg!(self.symbols.is_match(dbg!(name)))
     }
 }
 
@@ -305,7 +299,6 @@ impl std::fmt::Debug for Version<'_> {
     }
 }
 
-/*
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,25 +321,9 @@ comment */
                     };"#,
         };
         let script = VersionScript::parse(data).unwrap();
-        assert_equal(
-            script
-                .globals
-                .exact
-                .iter()
-                .map(|s| std::str::from_utf8(s.bytes()).unwrap()),
-            ["foo"],
-        );
-        assert_equal(
-            script
-                .globals
-                .prefixes
-                .iter()
-                .map(|s| std::str::from_utf8(s).unwrap()),
-            ["bar"],
-        );
-        assert!(script.locals.matches_all);
+        assert!(script.is_local("pes"));
     }
-
+    /*
     #[test]
     fn test_parse_version_script() {
         let data = VersionScriptData {
@@ -447,5 +424,5 @@ comment */
         // Missing parent version
         assert_invalid("VER2 {bar;} VER1;");
     }
+    */
 }
-*/
