@@ -6,10 +6,8 @@
 
 use crate::error;
 use crate::error::Result;
-use crate::hash::PreHashed;
 use crate::input_data::VersionScriptData;
 use crate::linker_script::skip_comments_and_whitespace;
-use crate::symbol::UnversionedSymbolName;
 use globset::Glob;
 use globset::GlobSet;
 use globset::GlobSetBuilder;
@@ -162,7 +160,7 @@ fn parse_version_script<'input>(input: &mut &'input BStr) -> winnow::Result<Vers
         });
     }
 
-    Ok(dbg!(version_script).build())
+    Ok(version_script.build())
 }
 
 impl<'data> VersionScript<'data> {
@@ -255,8 +253,7 @@ fn parse_version_section<'data>(
 
 impl Version<'_> {
     fn is_present(&self, name: &str) -> bool {
-        println!("{:?}", self.symbols);
-        dbg!(self.symbols.is_match(dbg!(name)))
+        self.symbols.is_match(name)
     }
 }
 
@@ -302,8 +299,8 @@ impl std::fmt::Debug for Version<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use itertools::Itertools;
-    use itertools::assert_equal;
+    //use itertools::Itertools;
+    //use itertools::assert_equal;
 
     #[test]
     fn test_parse_simple_version_script() {

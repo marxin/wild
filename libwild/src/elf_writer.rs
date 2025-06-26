@@ -111,7 +111,6 @@ use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSliceMut;
 use std::fmt::Display;
 use std::io::Cursor;
-use std::io::Read;
 use std::io::Write;
 use std::iter;
 use std::marker::PhantomData;
