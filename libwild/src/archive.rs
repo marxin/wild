@@ -216,8 +216,8 @@ fn evaluate_identifier<'data>(
     ident: &'data str,
     extended_filenames: Option<ExtendedFilenames<'data>>,
 ) -> Identifier<'data> {
-    if let Some(filenames) = extended_filenames {
-        if let Some(rest) = ident.strip_prefix('/') {
+    if let Some(filenames) = extended_filenames
+        && let Some(rest) = ident.strip_prefix('/') {
             // GNU ar puts a trailing '/' as the last byte of the identifier, but only if
             // the filename (excl. leading path components) is exactly 15 bytes long - e.g.
             // /path/to/src_utils.cpp.o => '/48            /'
@@ -228,7 +228,6 @@ fn evaluate_identifier<'data>(
                 };
             }
         }
-    }
     Identifier {
         data: ident.as_bytes(),
     }
