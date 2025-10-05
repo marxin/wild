@@ -1246,19 +1246,94 @@ impl BitMask {
 
 /// Extract a single bit from the provided `value`.
 #[must_use]
-pub fn extract_bit(value: u64, position: u32) -> u64 {
+pub const fn extract_bit(value: u64, position: u32) -> u64 {
     extract_bits(value, position, position + 1)
 }
 
 /// Extract range-specified ([`start`..`end`]) bits from the provided `value`.
 #[must_use]
-pub fn extract_bits(value: u64, start: u32, end: u32) -> u64 {
+pub const fn extract_bits(value: u64, start: u32, end: u32) -> u64 {
     if start == 0 && end == u64::BITS {
         return value;
     }
     debug_assert!(start < end);
     (value >> (start)) & ((1 << (end - start)) - 1)
 }
+
+impl BitRange {
+    const fn new(start: u32, end: u32) -> Self {
+        assert!(start < end, "Bit range must contain at least one element");
+        assert!(end <= u64::BITS, "Range must point to u64 type");
+        BitRange { start, end }
+    }
+
+    const fn len(&self) -> u32 {
+        self.end - self.start
+    }
+
+    const fn check_unique_mask(&self, mask: &mut u64) {
+        let mut i = self.start;
+
+        while i < self.end {
+            let m = 1 << i;
+            assert!((*mask & m) == 0, "Bit already mapped");
+            *mask |= m;
+            i += 1;
+        }
+    }
+}
+
+macro_rules! br {
+    ($start:expr, $end:expr) => {
+        BitRange::new($start, $end)
+    };
+}
+
+type BitRangeMapping = (BitRange, BitRange);
+
+#[must_use]
+const fn map_bit_range_value(mapping: &[BitRangeMapping], value: u64, reverse: bool) -> u64 {
+    let mut output = 0;
+    let mut source_mask = 0;
+    let mut dest_mask = 0;
+
+    let mut i = 0;
+    while i < mapping.len() {
+        let (mut source, mut dest) = mapping[i];
+        if reverse {
+            (source, dest) = (dest, source);
+        }
+
+        source.check_unique_mask(&mut source_mask);
+        dest.check_unique_mask(&mut dest_mask);
+        assert!(
+            source.len() == dest.len(),
+            "Source bit range length must match the destination"
+        );
+
+        output |= extract_bits(value, source.start, source.end) << dest.start;
+
+        i += 1;
+    }
+
+    output
+}
+
+#[must_use]
+pub(crate) const fn map_bit_range(mapping: &[BitRangeMapping], value: u64) -> u64 {
+    map_bit_range_value(mapping, value, false)
+}
+
+#[must_use]
+pub(crate) const fn map_bit_range_reverse(mapping: &[BitRangeMapping], value: u64) -> u64 {
+    map_bit_range_value(mapping, value, true)
+}
+
+const J_TYPE_THINGY: &[BitRangeMapping] = &[(br!(4, 5), br!(4, 5)), (br!(5, 6), br!(0, 1))];
+
+const _: () = {
+    assert!(0 == map_bit_range(J_TYPE_THINGY, 0));
+};
 
 #[cfg(test)]
 mod tests {
