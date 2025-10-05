@@ -3,7 +3,9 @@ use object::LittleEndian;
 use object::read::elf::ProgramHeader as _;
 use object::read::elf::SectionHeader;
 use std::borrow::Cow;
+use std::cmp::max;
 use std::fmt;
+use std::ops::Range;
 
 macro_rules! const_name_by_value {
     ($needle: expr, $( $const:ident ),*) => {
@@ -1090,6 +1092,7 @@ impl RelocationInstruction {
 
         // To figure out which bits are part of the relocation, we write a value with
         // all ones into a buffer that initially contains zeros.
+        // TODO: .len(), bit_mask function
         let all_ones = (1 << (range.end - range.start)) - 1;
         self.write_to_value(all_ones, false, &mut mask);
 
@@ -1261,10 +1264,12 @@ pub const fn extract_bits(value: u64, start: u32, end: u32) -> u64 {
 }
 
 impl BitRange {
-    const fn new(start: u32, end: u32) -> Self {
-        assert!(start < end, "Bit range must contain at least one element");
-        assert!(end <= u64::BITS, "Range must point to u64 type");
-        BitRange { start, end }
+    const fn from(range: &Range<u32>) -> Self {
+        assert!(range.end <= u64::BITS, "Range must point to u64 type");
+        BitRange {
+            start: range.start,
+            end: range.end,
+        }
     }
 
     const fn len(&self) -> u32 {
@@ -1283,13 +1288,7 @@ impl BitRange {
     }
 }
 
-macro_rules! br {
-    ($start:expr, $end:expr) => {
-        BitRange::new($start, $end)
-    };
-}
-
-type BitRangeMapping = (BitRange, BitRange);
+pub(crate) type BitRangeMapping = (Range<u32>, Range<u32>);
 
 #[must_use]
 const fn map_bit_range_value(mapping: &[BitRangeMapping], value: u64, reverse: bool) -> u64 {
@@ -1299,7 +1298,8 @@ const fn map_bit_range_value(mapping: &[BitRangeMapping], value: u64, reverse: b
 
     let mut i = 0;
     while i < mapping.len() {
-        let (mut source, mut dest) = mapping[i];
+        let mut source = BitRange::from(&mapping[i].0);
+        let mut dest = BitRange::from(&mapping[i].1);
         if reverse {
             (source, dest) = (dest, source);
         }
@@ -1325,15 +1325,25 @@ pub(crate) const fn map_bit_range(mapping: &[BitRangeMapping], value: u64) -> u6
 }
 
 #[must_use]
-pub(crate) const fn map_bit_range_reverse(mapping: &[BitRangeMapping], value: u64) -> u64 {
-    map_bit_range_value(mapping, value, true)
+pub(crate) const fn map_bit_range_reverse(mapping: &[BitRangeMapping], encoded: u64) -> u64 {
+    map_bit_range_value(mapping, encoded, true)
 }
 
-const J_TYPE_THINGY: &[BitRangeMapping] = &[(br!(4, 5), br!(4, 5)), (br!(5, 6), br!(0, 1))];
+#[must_use]
+pub(crate) const fn most_significant_destination_bit(mapping: &[BitRangeMapping]) -> u32 {
+    let mut msb = 0;
 
-const _: () = {
-    assert!(0 == map_bit_range(J_TYPE_THINGY, 0));
-};
+    let mut i = 0;
+    while i < mapping.len() {
+        let end = mapping[i].1.end;
+        if end > msb {
+            msb = end;
+        }
+        i += 1;
+    }
+
+    msb
+}
 
 #[cfg(test)]
 mod tests {

@@ -1,10 +1,14 @@
 use crate::elf::AllowedRange;
+use crate::elf::BitRangeMapping;
 use crate::elf::RelocationKind;
 use crate::elf::RelocationKindInfo;
 use crate::elf::RelocationSize;
 use crate::elf::RiscVInstruction;
 use crate::elf::extract_bit;
 use crate::elf::extract_bits;
+use crate::elf::map_bit_range;
+use crate::elf::map_bit_range_reverse;
+use crate::elf::most_significant_destination_bit;
 use crate::relaxation::RelocationModifier;
 use crate::utils::and_from_slice;
 use crate::utils::or_from_slice;
@@ -358,8 +362,16 @@ const STYPE_IMMEDIATE_MASK: u32 = 0b0000_0001_1111_1111_1111_0000_0111_1111;
 const BTYPE_IMMEDIATE_MASK: u32 = 0b0000_0001_1111_1111_1111_0000_0111_1111;
 const JTYPE_IMMEDIATE_MASK: u32 = 0b0000_0000_0000_0000_0000_1111_1111_1111;
 
-const CBTYPE_IMMEDIATE_MASK: u16 = 0b1110_0011_1000_0011;
+const CBTYPE_IMMEDIATE_MASK: u16 = !map_bit_range(CB_TYPE_ENCODING, u64::MAX) as u16;
 const CJTYPE_IMMEDIATE_MASK: u16 = 0b1110_0000_0000_0011;
+
+const CB_TYPE_ENCODING: &[BitRangeMapping] = &[
+    (5..6, 2..3),
+    (1..3, 3..5),
+    (6..8, 5..7),
+    (3..5, 10..12),
+    (8..9, 12..13),
+];
 
 impl RiscVInstruction {
     // Encode computed relocation value and store it based on the encoding of an instruction.
@@ -410,13 +422,9 @@ impl RiscVInstruction {
                 and_from_slice(dest, JTYPE_IMMEDIATE_MASK.to_le_bytes().as_slice());
                 or_from_slice(dest, &(mask as u32).to_le_bytes());
             }
+
             RiscVInstruction::CbType => {
-                let mut mask = extract_bit(extracted_value, 5) << 2;
-                mask |= extract_bits(extracted_value, 1, 3) << 3;
-                mask |= extract_bits(extracted_value, 6, 8) << 5;
-                // rs1' register takes 3 bits here
-                mask |= extract_bits(extracted_value, 3, 5) << 10;
-                mask |= extract_bit(extracted_value, 8) << 12;
+                let mask = map_bit_range(CB_TYPE_ENCODING, extracted_value);
                 // The compressed instruction only takes 2 bytes.
                 and_from_slice(dest, CBTYPE_IMMEDIATE_MASK.to_le_bytes().as_slice());
                 or_from_slice(dest, &mask.to_le_bytes()[..2]);
@@ -497,15 +505,10 @@ impl RiscVInstruction {
                 (sign_extended as u64, sign_extended < 0)
             }
             RiscVInstruction::CbType => {
-                let value = u16::from_le_bytes([bytes[0], bytes[1]]);
-                let imm5 = (value >> 2) & 0x1;
-                let imm1_2 = (value >> 3) & 0x3;
-                let imm6_7 = (value >> 5) & 0x3;
-                let imm3_4 = (value >> 10) & 0x3;
-                let imm8 = (value >> 12) & 0x1;
-
-                let imm = (imm8 << 8) | (imm6_7 << 6) | (imm5 << 5) | (imm3_4 << 3) | (imm1_2 << 1);
-                let sign_extended = (i32::from(imm) << 23) >> 23;
+                let encoded = u32_from_slice(bytes);
+                let imm = map_bit_range_reverse(CB_TYPE_ENCODING, u64::from(encoded)) as i32;
+                let bits = most_significant_destination_bit(CB_TYPE_ENCODING);
+                let sign_extended = (imm << bits) >> bits;
                 (sign_extended as u64, sign_extended < 0)
             }
             RiscVInstruction::CjType => {
