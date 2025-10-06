@@ -2,15 +2,16 @@ use crate::arch::ArchKind;
 use anyhow::Context;
 use anyhow::Result;
 use itertools::Itertools;
+use itertools::assert_equal;
 use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
 use tempfile::NamedTempFile;
 
-pub fn decode_insn_with_objdump(insn: &[u8], address: u64, arch: ArchKind) -> Result<String> {
+pub fn decode_insn_with_objdump(insns: &[u8], arch: ArchKind) -> Result<Vec<(u64, String)>> {
     // TODO: seems objdump cannot read from stdin
     let mut tmpfile = NamedTempFile::new()?;
-    tmpfile.write_all(insn)?;
+    tmpfile.write_all(insns)?;
     tmpfile.flush()?;
 
     let (objdump_arch, objdump_bin_candidates) = match arch {
@@ -27,7 +28,6 @@ pub fn decode_insn_with_objdump(insn: &[u8], address: u64, arch: ArchKind) -> Re
     let command = Command::new(objdump)
         .arg("-b")
         .arg("binary")
-        .arg(format!("--adjust-vma=0x{address:x}"))
         .arg("-m")
         .arg(objdump_arch)
         .arg("-D")
@@ -37,40 +37,49 @@ pub fn decode_insn_with_objdump(insn: &[u8], address: u64, arch: ArchKind) -> Re
         .context("Failed to spawn objdump")?;
 
     let output = command.wait_with_output().expect("Failed to read stdout");
-    let insn_line = String::from_utf8_lossy(&output.stdout)
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
         .lines()
-        .last()
-        .context("No objdump output")?
-        .to_owned();
+        .skip_while(|line| !line.starts_with("0000000000000000"))
+        .skip(1)
+        .map(|line| {
+            let (address, insn) = line.trim().split_once(':').unwrap();
+            dbg!(&address);
 
-    Ok(insn_line
-        .split_whitespace()
-        .skip(2)
-        .join(" ")
-        .replacen(" ", "\t", 1)
-        .clone())
+            // TODO: proper error propagation
+            (
+                u64::from_str_radix(address, 16).unwrap(),
+                insn.split_whitespace()
+                    .skip(2)
+                    .join(" ")
+                    .replacen(" ", "\t", 1)
+                    .clone(),
+            )
+        })
+        .collect())
 }
 
 #[test]
-fn test_align_up() {
+fn test_insn_decoding_with_objdump() {
     // Some distributions don't enable the features in objdump required for disassembly of aarch64,
     // so we only check that we can disassemble if we're running on aarch64 or if test
     // cross-compilation is enabled.
     if cfg!(target_arch = "aarch64")
         || std::env::var("WILD_TEST_CROSS").is_ok_and(|v| v.split(',').any(|a| a == "aarch64"))
     {
-        assert_eq!(
-            decode_insn_with_objdump(&[0xe3, 0x93, 0x44, 0xa9], 0x1000, ArchKind::Aarch64).unwrap(),
-            "ldp\tx3, x4, [sp, #72]"
+        assert_equal(
+            decode_insn_with_objdump(&[0xe3, 0x93, 0x44, 0xa9], ArchKind::Aarch64).unwrap(),
+            [(0, "ldp\tx3, x4, [sp, #72]".to_string())],
         );
     }
 
     if cfg!(target_arch = "riscv64")
         || std::env::var("WILD_TEST_CROSS").is_ok_and(|v| v.split(',').any(|a| a == "riscv64"))
     {
-        assert_eq!(
-            decode_insn_with_objdump(&[0x00, 0x20, 0xb0, 0x23], 0x1000, ArchKind::RISCV64).unwrap(),
-            "fld\tfa2,64(a5)"
+        assert_equal(
+            decode_insn_with_objdump(&[0x00, 0x20, 0xb0, 0x23], ArchKind::RISCV64).unwrap(),
+            [(0, "fld\tfa2,64(a5)".to_string())],
         );
     }
 }

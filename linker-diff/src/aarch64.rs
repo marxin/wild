@@ -150,26 +150,34 @@ impl Arch for AArch64 {
         _function_offset_in_section: u64,
         range: std::ops::Range<u64>,
     ) -> Vec<crate::arch::Instruction<'data, Self>> {
-        let mut offset = range.start & !3;
+        decode_insn_with_objdump(
+            &section_bytes[range.start as usize - 4..range.end as usize + 32],
+            ArchKind::Aarch64,
+        );
 
-        let mut instructions = Vec::new();
+        todo!();
 
-        while offset < range.end {
-            let bytes = &section_bytes[offset as usize..offset as usize + 4];
-            let address = section_address + offset;
+        // decode_insn_with_objdump(
+        //     &section_bytes[range.start as usize..range.end as usize + 32],
+        //     ArchKind::Aarch64,
+        // )
+        // .ok();
+        // while offset < range.end {
+        //     let bytes = &section_bytes[offset as usize..offset as usize + 4];
+        //     let address = section_address + offset;
 
-            let raw_instruction = decode_insn_with_objdump(bytes, address, ArchKind::Aarch64).ok();
+        //     let raw_instruction = decode_insn_with_objdump(bytes, address, ArchKind::Aarch64).ok();
 
-            instructions.push(crate::arch::Instruction {
-                raw_instruction,
-                address,
-                bytes,
-            });
+        //     instructions.push(crate::arch::Instruction {
+        //         raw_instruction,
+        //         address,
+        //         bytes,
+        //     });
 
-            offset += 4;
-        }
+        //     offset += 4;
+        // }
 
-        instructions
+        // instructions
     }
 
     fn decode_plt_entry(

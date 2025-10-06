@@ -69,27 +69,25 @@ impl Arch for RiscV64 {
     ) -> Vec<crate::arch::Instruction<'data, Self>> {
         let mut offset = range.start & !3;
 
-        let mut instructions = Vec::new();
+        let decoded_instructions = decode_insn_with_objdump(
+            &section_bytes[range.start as usize..range.end as usize],
+            ArchKind::RISCV64,
+        );
 
-        while offset < range.end {
-            if offset as usize + 4 > section_bytes.len() {
-                break;
-            }
-            let bytes = &section_bytes[offset as usize..offset as usize + 4];
-            let address = section_address + offset;
+        todo!();
 
-            let raw_instruction = decode_insn_with_objdump(bytes, address, ArchKind::RISCV64).ok();
+        //     let address = section_address + offset;
 
-            instructions.push(crate::arch::Instruction {
-                raw_instruction,
-                address,
-                bytes,
-            });
+        //     instructions.push(crate::arch::Instruction {
+        //         raw_instruction,
+        //         address,
+        //         bytes,
+        //     });
 
-            offset += 4;
-        }
+        //     offset += 4;
+        // }
 
-        instructions
+        // instructions
     }
 
     fn decode_plt_entry(
