@@ -6,6 +6,7 @@ Specification:
 - https://github.com/aidansteele/osx-abi-macho-file-format-reference
 - http://docs.rs/object
 - https://alexdremov.me/mystery-of-mach-o-object-file-builders/
+- https://www.youtube.com/watch?v=S9FFzsF0aIA&list=WL&index=1 (nice intro video)
 
 - Section name is limited to 16 characters -> `-ffunction-sections -fdata-sections` are implemented with `MH_SUBSECTIONS_VIA_SYMBOLS` - each symbol can be treaded as a separate section
   for purpose of GC.
@@ -59,6 +60,8 @@ Import { library: "/usr/lib/libSystem.B.dylib", name: "dyld_stub_binder" }
 4: Symbol { name: "__tlv_bootstrap", address: 0, size: 0, kind: Unknown, section: Undefined, scope: Unknown, weak: false, flags: MachO { n_desc: 100 } }
 ...
 ```
+
+- generally speaking the mach-O format is pretty close to the ELF container
 
 ## benchmarks: LLD vs. system linker
 
