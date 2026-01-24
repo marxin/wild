@@ -49,7 +49,7 @@ pub(crate) struct Prelude<'data> {
 pub(crate) struct ParsedInputObject<'data> {
     pub(crate) input: InputRef<'data>,
     pub(crate) object: File<'data>,
-    pub(crate) macho: Option<MachOFile<'data>>,
+    pub(crate) macho_object: Option<MachOFile<'data>>,
     pub(crate) dynamic_tag_values: Option<DynamicTagValues<'data>>,
     pub(crate) modifiers: Modifiers,
 }
@@ -209,7 +209,7 @@ impl<'data> ParsedInputObject<'data> {
                 Ok(Box::new(Self {
                     input: input.input,
                     object,
-                    macho: None,
+                    macho_object: None,
                     dynamic_tag_values,
                     modifiers: input.modifiers,
                 }))
@@ -220,7 +220,7 @@ impl<'data> ParsedInputObject<'data> {
                 Ok(Box::new(Self {
                     input: input.input,
                     object: Default::default(),
-                    macho: Some(macho_object),
+                    macho_object: Some(macho_object),
                     dynamic_tag_values: None,
                     modifiers: input.modifiers,
                 }))

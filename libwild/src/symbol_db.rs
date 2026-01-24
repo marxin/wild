@@ -64,6 +64,7 @@ use std::mem::take;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use symbolic_demangle::demangle;
+use winnow::combinator::todo;
 
 #[derive(Debug)]
 pub struct SymbolDb<'data> {
@@ -1378,6 +1379,7 @@ fn load_symbols_from_file<'data>(
     } else {
         RegularObjectSymbolLoader {
             object: &s.parsed.object,
+            macho_object: s.parsed.macho_object.as_ref(),
             args,
             version_script,
             archive_semantics: s.parsed.input.has_archive_semantics(),
@@ -1414,6 +1416,13 @@ trait SymbolLoader<'data> {
     ) -> Result {
         let e = LittleEndian;
         let base_symbol_id = symbols_out.next;
+
+        dbg!("load symbols called");
+
+        // TODO: trait
+        if self.macho_object().is_some() {
+            return self.load_macho_symbols(file_id, symbols_out, outputs);
+        }
 
         for symbol in self.object().symbols.iter() {
             let symbol_id = symbols_out.next;
@@ -1464,7 +1473,18 @@ trait SymbolLoader<'data> {
         Ok(())
     }
 
+    fn load_macho_symbols(
+        &self,
+        file_id: FileId,
+        symbols_out: &mut SymbolWriterShard,
+        outputs: &mut SymbolLoadOutputs<'data>,
+    ) -> Result {
+        Ok(())
+    }
+
     fn object(&self) -> &crate::elf::File<'data>;
+
+    fn macho_object(&self) -> Option<&crate::macho::MachOFile<'data>>;
 
     fn compute_value_flags(&self, symbol: &crate::elf::Symbol) -> ValueFlags;
 
@@ -1502,6 +1522,7 @@ pub(crate) struct RawSymbolName<'data> {
 
 struct RegularObjectSymbolLoader<'a, 'data> {
     object: &'a crate::elf::File<'data>,
+    macho_object: Option<&'a crate::macho::MachOFile<'data>>,
     args: &'a Args,
     version_script: &'a VersionScript<'a>,
     archive_semantics: bool,
@@ -1637,6 +1658,10 @@ impl<'data> SymbolLoader<'data> for RegularObjectSymbolLoader<'_, 'data> {
     fn object(&self) -> &crate::elf::File<'data> {
         self.object
     }
+
+    fn macho_object(&self) -> Option<&crate::macho::MachOFile<'data>> {
+        self.macho_object
+    }
 }
 
 impl<'data> RawSymbolName<'data> {
@@ -1716,6 +1741,10 @@ impl<'data> SymbolLoader<'data> for DynamicObjectSymbolLoader<'_, 'data> {
     fn should_ignore_symbol(&self, symbol: &crate::elf::Symbol) -> bool {
         // Shared objects shouldn't export hidden symbols. If for some reason they do, ignore them.
         crate::elf::is_hidden_symbol(symbol)
+    }
+
+    fn macho_object(&self) -> Option<&crate::macho::MachOFile<'data>> {
+        todo!()
     }
 }
 
