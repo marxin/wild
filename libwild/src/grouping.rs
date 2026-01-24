@@ -112,7 +112,14 @@ pub(crate) fn create_groups<'data>(
 
     while let Some(parsed) = objects.next() {
         let file_id = FileId::new(symbol_db.next_group_index(), group_objects.len() as u32);
-        let num_symbols_in_file = parsed.object.symbols.len();
+
+        // TODO
+        let num_symbols_in_file = if let Some(macho_object) = &parsed.macho_object {
+            macho_object.symbols.len()
+        } else {
+            parsed.object.symbols.len()
+        };
+        dbg!(&num_symbols_in_file);
 
         group_objects.push(SequencedInputObject {
             parsed,

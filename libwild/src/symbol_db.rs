@@ -53,8 +53,13 @@ use hashbrown::hash_map;
 use itertools::Itertools;
 use linker_utils::elf::SectionFlags;
 use linker_utils::elf::shf;
+use object::Endian;
+use object::Endianness;
 use object::LittleEndian;
+use object::macho;
+use object::macho::Nlist64;
 use object::read::elf::Sym as _;
+use object::read::macho::Nlist;
 use rayon::iter::IndexedParallelIterator as _;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::IntoParallelRefMutIterator as _;
@@ -1479,7 +1484,61 @@ trait SymbolLoader<'data> {
         symbols_out: &mut SymbolWriterShard,
         outputs: &mut SymbolLoadOutputs<'data>,
     ) -> Result {
+        let base_symbol_id = symbols_out.next;
+        let macho_object = self.macho_object().unwrap();
+
+        for symbol in macho_object.symbols.iter() {
+            let symbol_id = symbols_out.next;
+            let mut flags = self.macho_compute_value_flags(symbol);
+
+            if symbol.is_undefined() {
+                // TODO: || self.should_ignore_symbol(symbol) {
+                symbols_out.set_next(flags, SymbolId::undefined(), file_id);
+                continue;
+            }
+
+            let resolution = symbol_id;
+
+            let local_index = symbol_id.offset_from(base_symbol_id);
+
+            let n_type = symbol.n_type;
+            // TODO: is_local
+            if n_type & macho::N_TYPE != n_type && n_type & macho::N_PEXT != 0 {
+                symbols_out.set_next(flags, resolution, file_id);
+                continue;
+            }
+
+            let name = UnversionedSymbolName::prehashed(
+                symbol.name(Endianness::Little, macho_object.symbols.strings())?,
+            );
+            let pending = PendingSymbol::from_prehashed(symbol_id, name);
+            outputs.add_non_versioned(pending);
+
+            dbg!((&name, flags, resolution, file_id));
+            symbols_out.set_next(flags, resolution, file_id);
+        }
+
         Ok(())
+    }
+
+    // TODO: move
+    fn macho_compute_value_flags(&self, symbol: &Nlist64<Endianness>) -> ValueFlags {
+        let n_type = symbol.n_type();
+        if symbol.is_stab() {
+            let mut flags = ValueFlags::DYNAMIC;
+            if n_type & macho::N_FUN != 0 {
+                flags |= ValueFlags::FUNCTION;
+            }
+            flags
+        } else if n_type & macho::N_TYPE == n_type {
+            match n_type {
+                macho::N_ABS => ValueFlags::ABSOLUTE,
+                _ => ValueFlags::empty(),
+            }
+        } else {
+            // TODO
+            ValueFlags::empty()
+        }
     }
 
     fn object(&self) -> &crate::elf::File<'data>;
