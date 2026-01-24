@@ -1,7 +1,7 @@
 use object::{
     Endianness,
-    macho::{self, Section64, SegmentCommand64, SymtabCommand},
-    read::macho::{MachHeader, Nlist, Section, Segment},
+    macho::{self, Section64},
+    read::macho::{MachHeader, Section, Segment},
 };
 
 use crate::{ensure, error::Result};
@@ -36,7 +36,13 @@ impl<'data> MachOFile<'data> {
                 symbols = Some(symtab_command.symbols::<macho::MachHeader64<_>, _>(LE, data)?);
             } else if let Some((segment_command, segment_data)) = command.segment_64()? {
                 ensure!(sections.is_none(), "At most one segment command expected");
-                sections = Some(segment_command.sections(LE, segment_data)?);
+                let section_list = segment_command.sections(LE, segment_data)?;
+                sections = Some(section_list);
+                for section in section_list {
+                    for r in section.relocations(LE, data)? {
+                        dbg!(r.info(LE));
+                    }
+                }
             }
         }
 
