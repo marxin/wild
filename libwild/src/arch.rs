@@ -62,8 +62,10 @@ pub(crate) trait Arch {
     fn high_part_relocations() -> &'static [u32];
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// TODO: drop Default
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Architecture {
+    #[default]
     X86_64,
     AArch64,
     RISCV64,

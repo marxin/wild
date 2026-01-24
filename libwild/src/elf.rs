@@ -58,7 +58,8 @@ pub(crate) type NoteHeader = object::elf::NoteHeader64<LittleEndian>;
 type SectionTable<'data> = object::read::elf::SectionTable<'data, FileHeader>;
 type SymbolTable<'data> = object::read::elf::SymbolTable<'data, FileHeader>;
 
-#[derive(derive_more::Debug)]
+// TODO: drop Default
+#[derive(derive_more::Debug, Default)]
 pub(crate) struct File<'data> {
     pub(crate) arch: Architecture,
     #[debug(skip)]

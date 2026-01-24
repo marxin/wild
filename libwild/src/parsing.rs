@@ -14,6 +14,7 @@ use crate::input_data::InputBytes;
 use crate::input_data::InputLinkerScript;
 use crate::input_data::InputRef;
 use crate::layout_rules::LayoutRulesBuilder;
+use crate::macho::MachOFile;
 use crate::output_section_id;
 use crate::output_section_id::OutputSectionId;
 use crate::symbol::UnversionedSymbolName;
@@ -48,6 +49,7 @@ pub(crate) struct Prelude<'data> {
 pub(crate) struct ParsedInputObject<'data> {
     pub(crate) input: InputRef<'data>,
     pub(crate) object: File<'data>,
+    pub(crate) macho: Option<MachOFile<'data>>,
     pub(crate) dynamic_tag_values: Option<DynamicTagValues<'data>>,
     pub(crate) modifiers: Modifiers,
 }
@@ -182,31 +184,49 @@ impl<'data> InternalSymDefInfo<'data> {
     }
 }
 
+// TODO: make it generic over the platform
 impl<'data> ParsedInputObject<'data> {
     pub(crate) fn new(input: &InputBytes<'data>, args: &Args) -> Result<Box<Self>> {
         verbose_timing_phase!("Parse file");
-        let is_dynamic = input.kind == FileKind::ElfDynamic;
+        match input.kind {
+            FileKind::ElfObject | FileKind::ElfDynamic => {
+                let is_dynamic = input.kind == FileKind::ElfDynamic;
 
-        let object = File::parse(input.data, is_dynamic)
-            .with_context(|| format!("Failed to parse object file `{input}`"))?;
+                let object = File::parse(input.data, is_dynamic)
+                    .with_context(|| format!("Failed to parse object file `{input}`"))?;
 
-        if object.arch != args.arch {
-            bail!(
-                "`{}` has incompatible architecture: {}, expecting {}",
-                input.input,
-                object.arch,
-                args.arch,
-            )
+                if object.arch != args.arch {
+                    bail!(
+                        "`{}` has incompatible architecture: {}, expecting {}",
+                        input.input,
+                        object.arch,
+                        args.arch,
+                    )
+                }
+
+                let dynamic_tag_values = is_dynamic.then(|| DynamicTagValues::read(&object));
+
+                Ok(Box::new(Self {
+                    input: input.input,
+                    object,
+                    macho: None,
+                    dynamic_tag_values,
+                    modifiers: input.modifiers,
+                }))
+            }
+            FileKind::MachOObject => {
+                let macho_object = MachOFile::parse(input.data)
+                    .with_context(|| format!("Failed to parse Mach-O file `{input}`"))?;
+                Ok(Box::new(Self {
+                    input: input.input,
+                    object: Default::default(),
+                    macho: Some(macho_object),
+                    dynamic_tag_values: None,
+                    modifiers: input.modifiers,
+                }))
+            }
+            _ => unreachable!("unexpected FileKind in parsing"),
         }
-
-        let dynamic_tag_values = is_dynamic.then(|| DynamicTagValues::read(&object));
-
-        Ok(Box::new(Self {
-            input: input.input,
-            object,
-            dynamic_tag_values,
-            modifiers: input.modifiers,
-        }))
     }
 
     pub(crate) fn is_dynamic(&self) -> bool {
