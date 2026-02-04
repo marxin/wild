@@ -8,6 +8,10 @@ Specification:
 - https://alexdremov.me/mystery-of-mach-o-object-file-builders/
 - https://www.youtube.com/watch?v=S9FFzsF0aIA&list=WL&index=1 (nice intro video)
 
+- File format layout:
+
+ ![layout](./mach64_structure.png)
+
 - Section name is limited to 16 characters -> `-ffunction-sections -fdata-sections` are implemented with `MH_SUBSECTIONS_VIA_SYMBOLS` - each symbol can be treaded as a separate section
   for purpose of GC.
 
@@ -33,6 +37,12 @@ DylibCommand {
 ```
 
 - no linker scripts
+
+- no copy relocations
+
+- the ld linker uses a different set of option names - though most of them have a direct mapping in the BFD
+
+- no protected visibility
 
 - two-level binding for externally defined symbols in a shared library:
 
