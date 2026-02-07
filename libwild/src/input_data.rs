@@ -467,7 +467,7 @@ fn process_archive<'data, O: ObjectFile<'data>>(
                     modifiers: input_file.modifiers,
                 };
 
-                let parsed = ParsedInputObject::new::<O>(&input_bytes, args);
+                let parsed = ParsedInputObject::new(&input_bytes, args);
 
                 outputs.push(parsed);
             }

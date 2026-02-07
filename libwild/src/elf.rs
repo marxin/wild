@@ -3,6 +3,7 @@ use crate::bail;
 use crate::ensure;
 use crate::error::Context as _;
 use crate::error::Result;
+use crate::parsing::DynamicTagValues;
 use crate::resolution::LoadedMetrics;
 use linker_utils::bit_misc::BitExtraction;
 use linker_utils::elf::BitMask;
@@ -83,6 +84,8 @@ pub(crate) struct File<'data> {
 
     /// e_flags from the header.
     pub(crate) eflags: u32,
+
+    pub(crate) dynamic_tag_values: Option<DynamicTagValues<'data>>,
 }
 
 pub(crate) trait Relocation<'data> {
@@ -183,7 +186,8 @@ impl<'data> File<'data> {
             }
         }
 
-        Ok(Self {
+        // TODO: improve
+        let mut file = Self {
             arch: architecture,
             data,
             sections,
@@ -193,7 +197,10 @@ impl<'data> File<'data> {
             verdefnum,
             verneed,
             eflags,
-        })
+            dynamic_tag_values: None,
+        };
+        file.dynamic_tag_values = Some(DynamicTagValues::read(&file));
+        Ok(file)
     }
 
     pub(crate) fn section(&self, index: object::SectionIndex) -> Result<&'data SectionHeader> {

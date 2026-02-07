@@ -14,7 +14,6 @@ use crate::input_data::InputBytes;
 use crate::input_data::InputLinkerScript;
 use crate::input_data::InputRef;
 use crate::layout_rules::LayoutRulesBuilder;
-use crate::macho::MachOFile;
 use crate::output_section_id;
 use crate::output_section_id::OutputSectionId;
 use crate::platform::ObjectFile;
@@ -50,7 +49,6 @@ pub(crate) struct Prelude<'data> {
 pub(crate) struct ParsedInputObject<'data, O: ObjectFile<'data>> {
     pub(crate) input: InputRef<'data>,
     pub(crate) object: O,
-    pub(crate) dynamic_tag_values: Option<DynamicTagValues<'data>>,
     pub(crate) modifiers: Modifiers,
 }
 
@@ -184,58 +182,36 @@ impl<'data> InternalSymDefInfo<'data> {
     }
 }
 
-impl<'data> ParsedInputObject<'data, File<'data>> {
+impl<'data, O: ObjectFile<'data>> ParsedInputObject<'data, O> {
     pub(crate) fn new(input: &InputBytes<'data>, args: &Args) -> Result<Box<Self>> {
         verbose_timing_phase!("Parse file");
+        let is_dynamic = input.kind == FileKind::ElfDynamic;
         match input.kind {
             FileKind::ElfObject | FileKind::ElfDynamic => {
-                let is_dynamic = input.kind == FileKind::ElfDynamic;
-
-                let object = File::parse(input.data, is_dynamic)
+                let object = O::parse(input.data, is_dynamic)
                     .with_context(|| format!("Failed to parse object file `{input}`"))?;
 
-                if object.arch != args.arch {
+                if object.arch() != args.arch {
                     bail!(
                         "`{}` has incompatible architecture: {}, expecting {}",
                         input.input,
-                        object.arch,
+                        object.arch(),
                         args.arch,
                     )
                 }
 
-                let dynamic_tag_values = is_dynamic.then(|| DynamicTagValues::read(&object));
-
                 Ok(Box::new(Self {
                     input: input.input,
                     object,
-                    dynamic_tag_values,
                     modifiers: input.modifiers,
                 }))
             }
-            _ => unreachable!("unexpected FileKind in parsing"),
-        }
-    }
-
-    pub(crate) fn is_dynamic(&self) -> bool {
-        self.dynamic_tag_values.is_some()
-    }
-
-    pub(crate) fn num_symbols(&self) -> usize {
-        self.object.symbols.len()
-    }
-}
-
-impl<'data> ParsedInputObject<'data, MachOFile<'data>> {
-    pub(crate) fn new(input: &InputBytes<'data>, _args: &Args) -> Result<Box<Self>> {
-        verbose_timing_phase!("Parse file");
-        match input.kind {
             FileKind::MachOObject => {
-                let object = MachOFile::parse(input.data)
+                let object = O::parse(input.data, is_dynamic)
                     .with_context(|| format!("Failed to parse Mach-O file `{input}`"))?;
                 Ok(Box::new(Self {
                     input: input.input,
                     object,
-                    dynamic_tag_values: None,
                     modifiers: input.modifiers,
                 }))
             }
@@ -244,11 +220,11 @@ impl<'data> ParsedInputObject<'data, MachOFile<'data>> {
     }
 
     pub(crate) fn is_dynamic(&self) -> bool {
-        false
+        self.object.dynamic_tag_values().is_some()
     }
 
     pub(crate) fn num_symbols(&self) -> usize {
-        todo!()
+        self.object.symbol_count()
     }
 }
 
@@ -356,7 +332,7 @@ pub(crate) struct DynamicTagValues<'data> {
 }
 
 impl<'data> DynamicTagValues<'data> {
-    fn read(file: &File<'data>) -> Self {
+    pub(crate) fn read(file: &File<'data>) -> Self {
         let mut values = DynamicTagValues::default();
         let Ok(dynamic_tags) = file.dynamic_tags() else {
             return values;
