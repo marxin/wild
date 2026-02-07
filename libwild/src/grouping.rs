@@ -6,6 +6,7 @@ use crate::parsing::ParsedInputObject;
 use crate::parsing::Prelude;
 use crate::parsing::ProcessedLinkerScript;
 use crate::parsing::SyntheticSymbols;
+use crate::platform::ObjectFile;
 use crate::sharding::ShardKey as _;
 use crate::symbol::UnversionedSymbolName;
 use crate::symbol_db::SymbolDb;
@@ -88,9 +89,9 @@ impl Group<'_> {
     }
 }
 
-pub(crate) fn create_groups<'data>(
+pub(crate) fn create_groups<'data, O: ObjectFile<'data>>(
     symbol_db: &mut SymbolDb<'data>,
-    parsed_objects: Vec<Box<ParsedInputObject<'data>>>,
+    parsed_objects: Vec<Box<ParsedInputObject<'data, O>>>,
     linker_scripts: Vec<ProcessedLinkerScript<'data>>,
 ) {
     timing_phase!("Group files");

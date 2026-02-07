@@ -31,6 +31,7 @@ use crate::parsing::InternalSymDefInfo;
 use crate::parsing::Prelude;
 use crate::parsing::SymbolPlacement;
 use crate::parsing::SyntheticSymbols;
+use crate::platform::ObjectFile;
 use crate::resolution::ResolvedFile;
 use crate::resolution::ResolvedGroup;
 use crate::resolution::ResolvedSyntheticSymbols;
@@ -384,12 +385,12 @@ impl<'data> SymbolDb<'data> {
         Ok(symbol_db)
     }
 
-    pub(crate) fn add_inputs(
+    pub(crate) fn add_inputs<O: ObjectFile<'data>>(
         &mut self,
         per_symbol_flags: &mut PerSymbolFlags,
         output_sections: &mut OutputSections<'data>,
         layout_rules_builder: &mut LayoutRulesBuilder<'data>,
-        loaded: LoadedInputs<'data>,
+        loaded: LoadedInputs<'data, O>,
     ) -> Result {
         timing_phase!("Load inputs into symbol DB");
 

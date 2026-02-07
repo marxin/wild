@@ -45,6 +45,7 @@ pub(crate) mod perf;
 ))]
 #[path = "perf_unsupported.rs"]
 pub(crate) mod perf;
+pub(crate) mod platform;
 pub(crate) mod program_segments;
 pub(crate) mod resolution;
 pub(crate) mod riscv64;
@@ -72,6 +73,7 @@ use crate::error::Result;
 use crate::identity::linker_identity;
 use crate::layout_rules::LayoutRulesBuilder;
 use crate::output_kind::OutputKind;
+use crate::platform::ElfPlatform;
 use crate::value_flags::PerSymbolFlags;
 pub use args::Args;
 use colosseum::sync::Arena;
@@ -198,8 +200,13 @@ impl Linker {
 
         // Note, we propagate errors from `link_with_input_data` after we've checked if any files
         // changed. We want inputs-changed errors to take precedence over all other errors.
-        let result = self.load_inputs_and_link::<A>(&mut file_loader, args);
-
+        let result = if cfg!(target_os = "linux") {
+            self.load_inputs_and_link::<A, ElfPlatform>(&mut file_loader, args)
+        } else if cfg!(target_os = "macos") {
+            todo!();
+        } else {
+            bail!("Unsupported platform");
+        };
         file_loader.verify_inputs_unchanged()?;
 
         // Write dependency file after successful linking
@@ -218,12 +225,12 @@ impl Linker {
         result
     }
 
-    fn load_inputs_and_link<'data, A: arch::Arch>(
+    fn load_inputs_and_link<'data, A: arch::Arch, P: platform::Platform>(
         &'data self,
         file_loader: &mut FileLoader<'data>,
         args: &'data Args,
     ) -> error::Result<LinkerOutput<'data>> {
-        let loaded = file_loader.load_inputs(&args.inputs, args)?;
+        let loaded = file_loader.load_inputs::<P::ObjectFile<'data>>(&args.inputs, args)?;
 
         args.save_dir.finish(file_loader, args)?;
 

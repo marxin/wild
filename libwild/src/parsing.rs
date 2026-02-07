@@ -17,6 +17,7 @@ use crate::layout_rules::LayoutRulesBuilder;
 use crate::macho::MachOFile;
 use crate::output_section_id;
 use crate::output_section_id::OutputSectionId;
+use crate::platform::ObjectFile;
 use crate::symbol::UnversionedSymbolName;
 use crate::symbol_db::SymbolId;
 use crate::symbol_db::SymbolIdRange;
@@ -46,10 +47,9 @@ pub(crate) struct Prelude<'data> {
 }
 
 #[derive(Debug)]
-pub(crate) struct ParsedInputObject<'data> {
+pub(crate) struct ParsedInputObject<'data, O: ObjectFile<'data>> {
     pub(crate) input: InputRef<'data>,
-    pub(crate) object: File<'data>,
-    pub(crate) macho_object: Option<MachOFile<'data>>,
+    pub(crate) object: O,
     pub(crate) dynamic_tag_values: Option<DynamicTagValues<'data>>,
     pub(crate) modifiers: Modifiers,
 }
@@ -184,8 +184,7 @@ impl<'data> InternalSymDefInfo<'data> {
     }
 }
 
-// TODO: make it generic over the platform
-impl<'data> ParsedInputObject<'data> {
+impl<'data> ParsedInputObject<'data, File<'data>> {
     pub(crate) fn new(input: &InputBytes<'data>, args: &Args) -> Result<Box<Self>> {
         verbose_timing_phase!("Parse file");
         match input.kind {
@@ -209,19 +208,7 @@ impl<'data> ParsedInputObject<'data> {
                 Ok(Box::new(Self {
                     input: input.input,
                     object,
-                    macho_object: None,
                     dynamic_tag_values,
-                    modifiers: input.modifiers,
-                }))
-            }
-            FileKind::MachOObject => {
-                let macho_object = MachOFile::parse(input.data)
-                    .with_context(|| format!("Failed to parse Mach-O file `{input}`"))?;
-                Ok(Box::new(Self {
-                    input: input.input,
-                    object: Default::default(),
-                    macho_object: Some(macho_object),
-                    dynamic_tag_values: None,
                     modifiers: input.modifiers,
                 }))
             }
@@ -235,6 +222,33 @@ impl<'data> ParsedInputObject<'data> {
 
     pub(crate) fn num_symbols(&self) -> usize {
         self.object.symbols.len()
+    }
+}
+
+impl<'data> ParsedInputObject<'data, MachOFile<'data>> {
+    pub(crate) fn new(input: &InputBytes<'data>, _args: &Args) -> Result<Box<Self>> {
+        verbose_timing_phase!("Parse file");
+        match input.kind {
+            FileKind::MachOObject => {
+                let object = MachOFile::parse(input.data)
+                    .with_context(|| format!("Failed to parse Mach-O file `{input}`"))?;
+                Ok(Box::new(Self {
+                    input: input.input,
+                    object,
+                    dynamic_tag_values: None,
+                    modifiers: input.modifiers,
+                }))
+            }
+            _ => unreachable!("unexpected FileKind in parsing"),
+        }
+    }
+
+    pub(crate) fn is_dynamic(&self) -> bool {
+        false
+    }
+
+    pub(crate) fn num_symbols(&self) -> usize {
+        todo!()
     }
 }
 
