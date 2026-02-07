@@ -38,6 +38,10 @@ pub enum RelaxationKind {
 
     /// Replace with ldr x0
     LdrX0,
+
+    /// Replace add with adr. We don't apply this, but lld does, so this is used by linker-diff.
+    AddToAdr,
+    LdrToAdr,
 }
 
 impl RelaxationKind {
@@ -62,15 +66,15 @@ impl RelaxationKind {
             }
             RelaxationKind::MovzXnLsl16 => {
                 let reg = u64::from(u32_from_slice(&section_bytes[offset..offset + 4]))
-                    .extract_bits(0..5) as u8;
+                    .extract_bit_range(0..5) as u8;
                 section_bytes[offset..offset + 4].copy_from_slice(&[
                     reg, 0x0, 0xa0, 0xd2, // movz x{reg}, ${offset}, lsl #16
                 ]);
             }
             RelaxationKind::MovkXn => {
                 let raw = u64::from(u32_from_slice(&section_bytes[offset..offset + 4]));
-                let dst_reg = raw.extract_bits(0..5) as u8;
-                let src_reg = raw.extract_bits(5..10) as u8;
+                let dst_reg = raw.extract_bit_range(0..5) as u8;
+                let src_reg = raw.extract_bit_range(5..10) as u8;
                 debug_assert_eq!(
                     src_reg, dst_reg,
                     "Source and destination registers must be equal"
@@ -82,6 +86,12 @@ impl RelaxationKind {
             RelaxationKind::AdrpToAdr => {
                 // Clear the op bit of the instruction. See C6.2.12 and C6.2.13.
                 section_bytes[offset + 3] &= !0x80;
+            }
+            RelaxationKind::AddToAdr => {
+                section_bytes[offset + 3] &= !0x89;
+            }
+            RelaxationKind::LdrToAdr => {
+                section_bytes[offset + 3] &= !0x89;
             }
             RelaxationKind::AdrpX0 => {
                 section_bytes[offset..offset + 4].copy_from_slice(&[
@@ -952,8 +962,8 @@ impl AArch64Instruction {
         match self {
             // C6.2.13
             AArch64Instruction::Adr => {
-                mask = ((extracted_value.extract_bits(0..2) as u32) << 29)
-                    | ((extracted_value.extract_bits(2..32) as u32) << 5);
+                mask = ((extracted_value.extract_bit_range(0..2) as u32) << 29)
+                    | ((extracted_value.extract_bit_range(2..32) as u32) << 5);
             }
             // C6.2.252, C6.2.254
             AArch64Instruction::Movkz => {
@@ -969,7 +979,7 @@ impl AArch64Instruction {
                     // Set opcode for MOVZ instruction
                     mask |= 1 << 30;
                 }
-                mask |= ((value as u64).extract_bits(0..16) as u32) << 5;
+                mask |= ((value as u64).extract_bit_range(0..16) as u32) << 5;
             }
             // C6.2.192
             AArch64Instruction::Ldr => {

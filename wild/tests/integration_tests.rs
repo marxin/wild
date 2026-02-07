@@ -39,6 +39,14 @@
 //! NoSym:symbol-name Checks that the specified symbol name is not defined in either .symtab or
 //! .dynsym.
 //!
+//! NoDynSym:symbol-name Checks that the specified symbol name is not defined in .dynsym.
+//!
+//! ExpectDynamic:tag-name Checks that the specified dynamic entry (e.g. DT_RUNPATH, DT_FLAGS) is
+//! present in the .dynamic section.
+//!
+//! NoDynamic:tag-name Checks that the specified dynamic entry (e.g. DT_RPATH, DT_BIND_NOW) is
+//! absent from the .dynamic section.
+//!
 //! ExpectComment: Checks that the comment in the .comment section is equal to the supplied
 //! argument. If no ExpectComment directives are given then .comment isn't checked. The argument may
 //! end with '*' which matches anything.
@@ -67,8 +75,8 @@
 //!
 //! Cross:{bool} Defaults to true. Set to false to disable cross-compilation testing for this test.
 //!
-//! ExpectError:{error string} Verifies that the link fails and that the error message includes the
-//! specified string. Implies `RunEnabled:false` and `DiffEnabled:false`. May be specified multiple
+//! ExpectError:{error regex} Verifies that the link fails and that the error message matches the
+//! specified regex. Implies `RunEnabled:false` and `DiffEnabled:false`. May be specified multiple
 //! times - all must match.
 //!
 //! SecEquiv:{sec-name}={sec-name} Tells linker-diff that the two section names should be considered
@@ -166,7 +174,9 @@ use std::collections::HashSet;
 use std::env;
 use std::fmt::Debug;
 use std::fmt::Display;
+use std::fmt::Write as _;
 use std::fs::read_dir;
+use std::hash::BuildHasher as _;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::io::BufRead;
@@ -265,17 +275,14 @@ impl Linker {
             cross_arch,
         )?;
 
-        if self.is_wild()
-            || !is_newer(so_path, objects.iter().map(|o| &o.path))
-            || !command.can_skip
-        {
+        if !command.can_skip() {
             // If we're expecting errors, those errors should only occur when we link the final
             // binary, not when we link any dependent shared objects.
             let mut config = config.clone();
             config.expect_errors = Vec::new();
 
             command.run(&config)?;
-            write_cmd_file(so_path, &command.to_string())?;
+            command.write_input_hashes()?;
         }
 
         Ok(LinkerInput::with_command(so_path.to_owned(), command))
@@ -316,10 +323,11 @@ struct LinkCommand {
     command: Command,
     input_commands: Vec<LinkCommand>,
     linker: Linker,
-    can_skip: bool,
     invocation_mode: LinkerInvocationMode,
     opt_save_dir: Option<PathBuf>,
     output_path: PathBuf,
+    inputs: Vec<LinkerInput>,
+    config: Config,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -465,6 +473,9 @@ fn is_musl_used() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
+    /// The base build directory for the test (without config name).
+    base_build_dir: PathBuf,
+    /// The build directory for this config (base_build_dir + config name).
     build_dir: PathBuf,
     name: String,
     variant_num: Option<u32>,
@@ -485,7 +496,7 @@ struct Config {
     compiler: String,
     should_diff: bool,
     should_run: bool,
-    expect_errors: Vec<String>,
+    expect_errors: Vec<ErrorMatcher>,
     support_architectures: Vec<Architecture>,
     requires_glibc: bool,
     requires_glibc_version: Option<String>,
@@ -523,6 +534,10 @@ struct TestConfig {
     /// Enable this to verify that wild produces output matching other linkers.
     #[serde(default)]
     run_all_diffs: bool,
+
+    /// A list of external tests to ignore. Expected values are filenames not full paths.
+    #[serde(default)]
+    ignore_external_tests: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize, Debug, Default)]
@@ -554,6 +569,11 @@ enum Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct DirectConfig {
     mode: Mode,
+}
+
+#[derive(Debug, Clone)]
+struct ErrorMatcher {
+    regex: regex::bytes::Regex,
 }
 
 fn get_glibc_version() -> Option<Vec<u32>> {
@@ -833,10 +853,13 @@ struct Assertions {
     expected_dynsym_entries: Vec<ExpectedSymtabEntry>,
     expected_comments: Vec<String>,
     no_sym: HashSet<String>,
+    no_dynsym: HashSet<String>,
     does_not_contain: Vec<String>,
     contains_strings: Vec<String>,
     expect_dynamic: bool,
     expected_load_alignment: Option<u64>,
+    expected_dynamic_entries: Vec<String>,
+    absent_dynamic_entries: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -921,6 +944,7 @@ impl ArgumentSet {
 impl Config {
     fn new(test_config: &TestConfig, build_dir: PathBuf) -> Self {
         Self {
+            base_build_dir: build_dir.clone(),
             build_dir,
             name: "default".to_owned(),
             variant_num: None,
@@ -1067,6 +1091,9 @@ fn parse_configs(src_filename: &Path, default_config: &Config) -> Result<Vec<Con
                 "NoSym" => {
                     config.assertions.no_sym.insert(arg.trim().to_owned());
                 }
+                "NoDynSym" => {
+                    config.assertions.no_dynsym.insert(arg.trim().to_owned());
+                }
                 "DoesNotContain" => config
                     .assertions
                     .does_not_contain
@@ -1074,6 +1101,14 @@ fn parse_configs(src_filename: &Path, default_config: &Config) -> Result<Vec<Con
                 "Contains" => config
                     .assertions
                     .contains_strings
+                    .push(arg.trim().to_owned()),
+                "ExpectDynamic" => config
+                    .assertions
+                    .expected_dynamic_entries
+                    .push(arg.trim().to_owned()),
+                "NoDynamic" => config
+                    .assertions
+                    .absent_dynamic_entries
                     .push(arg.trim().to_owned()),
                 "ExpectLoadAlignment" => {
                     let alignment_str = arg.trim();
@@ -1111,7 +1146,7 @@ fn parse_configs(src_filename: &Path, default_config: &Config) -> Result<Vec<Con
                 }
                 "Cross" => config.cross_enabled = parse_bool(arg, "Cross")?,
                 "ExpectError" => {
-                    config.expect_errors.push(arg.trim().to_owned());
+                    config.expect_errors.push(ErrorMatcher::new(arg.trim())?);
                     // If there are errors, then there's nothing to run and nothing to diff.
                     config.should_run = false;
                     config.should_diff = false;
@@ -1681,17 +1716,26 @@ fn build_linker_input(
         .context("At least one object is required")?
         .path;
 
+    let first_source_filename = dep
+        .files
+        .first()
+        .context("At least one file is required")?
+        .filename
+        .as_str();
+    let archive_basename = Path::new(first_source_filename)
+        .file_stem()
+        .context("Invalid source filename")?;
+    let archive_path = config.build_dir.join(archive_basename).with_extension("a");
+
     let mut linker_input = match dep.input_type {
         InputType::Archive | InputType::ThinArchive => {
             let thin = matches!(dep.input_type, InputType::ThinArchive);
-            let archive_path = first_obj_path.with_extension("a");
             if !is_newer(&archive_path, objects.iter().map(|o| &o.path)) {
                 make_archive(&archive_path, &objects, thin)?;
             }
             LinkerInput::new(archive_path)
         }
         InputType::BsdArchive => {
-            let archive_path = first_obj_path.with_extension("a");
             if !is_newer(&archive_path, objects.iter().map(|o| &o.path)) {
                 make_bsd_archive(&archive_path, &objects)?;
             }
@@ -1908,14 +1952,9 @@ fn build_obj(
     command_as_str(&command).hash(&mut hasher);
     let command_hash = hasher.finish();
 
-    let arch_str = cross_name(cross_arch);
-
     let output_path = config
         .build_dir
-        .join(Path::new(&file.filename).with_extension(format!(
-            "{}-{arch_str}-{command_hash:x}{suffix}",
-            config.name
-        )));
+        .join(Path::new(&file.filename).with_extension(format!("{command_hash:x}{suffix}")));
 
     match compiler_kind {
         CompilerKind::C => {
@@ -2066,12 +2105,6 @@ fn run_with_path(output_path: &Path) -> PathBuf {
     output_path.join("run-with")
 }
 
-fn write_cmd_file(output_path: &Path, command_str: &str) -> Result {
-    let path = cmd_path(output_path);
-    std::fs::write(&path, command_str)
-        .with_context(|| format!("Failed to write `{}`", path.display()))
-}
-
 fn command_as_str(command: &Command) -> String {
     format!(
         "{} {} {}",
@@ -2090,18 +2123,6 @@ fn command_as_str(command: &Command) -> String {
             .collect_vec()
             .join(" ")
     )
-}
-
-fn cmd_path(output_path: &Path) -> PathBuf {
-    let mut p = output_path.as_os_str().to_owned();
-    p.push(".cmd");
-    PathBuf::from(p)
-}
-
-/// Returns whether the command file for `output_path` exists and contains `command`.
-fn cmd_file_is_current(output_path: &Path, command: &str) -> bool {
-    std::fs::read_to_string(cmd_path(output_path))
-        .is_ok_and(|previous_command| previous_command == command)
 }
 
 fn src_path(filename: &str) -> PathBuf {
@@ -2184,7 +2205,7 @@ impl Linker {
         config: &Config,
         cross_arch: Option<Architecture>,
     ) -> Result<LinkOutput> {
-        let output_path = self.output_path(basename, config, cross_arch);
+        let output_path = self.output_path(basename, config);
         let mut linker_args = config.linker_args.clone();
         if self.is_wild() {
             linker_args
@@ -2193,9 +2214,9 @@ impl Linker {
         }
         let mut command =
             LinkCommand::new(self, inputs, &output_path, &linker_args, config, cross_arch)?;
-        if !command.can_skip {
+        if !command.can_skip() {
             command.run(config)?;
-            write_cmd_file(&output_path, &command.to_string())?;
+            command.write_input_hashes()?;
         }
         Ok(LinkOutput {
             binary: output_path,
@@ -2204,16 +2225,8 @@ impl Linker {
         })
     }
 
-    fn output_path(
-        &self,
-        basename: &str,
-        config: &Config,
-        cross_arch: Option<Architecture>,
-    ) -> PathBuf {
-        let cross = cross_name(cross_arch);
-        config
-            .build_dir
-            .join(format!("{basename}-{}-{cross}.{self}", config.name))
+    fn output_path(&self, basename: &str, config: &Config) -> PathBuf {
+        config.build_dir.join(format!("{basename}.{self}"))
     }
 }
 
@@ -2406,55 +2419,24 @@ impl LinkCommand {
 
         let mut link_command = LinkCommand {
             command,
+            inputs: inputs.to_vec(),
             input_commands: inputs
                 .iter()
                 .filter_map(|input| input.command.as_ref().cloned())
                 .collect(),
             linker: linker.clone(),
-            can_skip: false,
+            config: config.clone(),
             invocation_mode,
             opt_save_dir,
             output_path: output_path.to_owned(),
         };
 
-        let depfile_path = output_path.with_extension("d");
-        if !linker.is_wild() {
-            match invocation_mode {
-                LinkerInvocationMode::Direct | LinkerInvocationMode::Script => {
-                    link_command
-                        .command
-                        .arg(format!("--dependency-file={}", depfile_path.display()));
-                }
-                LinkerInvocationMode::Cc => {
-                    link_command
-                        .command
-                        .arg(format!("-Wl,--dependency-file={}", depfile_path.display()));
-                }
-            }
-        }
-
-        let base_ok =
-            !linker.is_wild() && cmd_file_is_current(output_path, &link_command.to_string());
-
-        // We allow skipping linking if all the object and otherwise tracked files
-        // are unchanged and are older than our output file, but not if we're linking
-        // with our linker, since we're always changing that. We also require that the
-        // command we're going to run hasn't changed.
-        let can_skip = if !linker.is_wild() && depfile_path.is_file() {
-            match parse_ld_dependency_file(&depfile_path) {
-                Ok(deps) if !deps.is_empty() => {
-                    base_ok
-                        && is_newer(output_path, deps.iter())
-                        && is_newer(output_path, config.tracked_files.iter())
-                }
-                _ => false,
-            }
-        } else {
-            base_ok
-                && is_newer(output_path, inputs.iter().map(|i| i.path.as_path()))
-                && is_newer(output_path, config.tracked_files.iter())
-        };
-        link_command.can_skip = can_skip;
+        link_command
+            .command
+            .arg(invocation_mode.format_arg(&format!(
+                "--dependency-file={}",
+                link_command.depfile_path().display()
+            )));
 
         Ok(link_command)
     }
@@ -2473,11 +2455,7 @@ impl LinkCommand {
             }
 
             for expected_error in &config.expect_errors {
-                if !output
-                    .stderr
-                    .windows(expected_error.len())
-                    .any(|s| s == expected_error.as_bytes())
-                {
+                if !expected_error.matches(&output.stderr) {
                     eprintln!(
                         "-- stdout --\n{}\n-- stderr --\n{}\n-- end --",
                         String::from_utf8_lossy(&output.stdout),
@@ -2545,6 +2523,89 @@ impl LinkCommand {
 
         Ok(())
     }
+
+    /// Returns whether we can skip invoking the linker.
+    fn can_skip(&self) -> bool {
+        // We never skip linking when the linker is wild.
+        if self.linker.is_wild() {
+            return false;
+        }
+
+        if !self.output_path.is_file() {
+            return false;
+        }
+
+        let Ok(previous_hashes) = std::fs::read_to_string(self.hashes_path()) else {
+            return false;
+        };
+
+        self.input_hashes() == previous_hashes
+    }
+
+    /// Returns a report containing the hashes of all the inputs. Also includes the linker
+    /// command-line, not hashed, because that's more useful.
+    fn input_hashes(&self) -> String {
+        let mut hashes = self.to_string();
+
+        hashes.push_str("\n\n");
+
+        let mut hash_file = |path: &Path| {
+            hashes.push_str(&path.to_string_lossy());
+            hashes.push_str(": ");
+            match std::fs::read(path) {
+                Ok(contents) => {
+                    let mut hasher = foldhash::fast::FixedState::default().build_hasher();
+                    hasher.write(&contents);
+                    write!(&mut hashes, "{:x}", hasher.finish()).unwrap();
+                }
+                Err(error) => hashes.push_str(&error.to_string()),
+            }
+            hashes.push('\n');
+        };
+
+        for dep in &self.config.tracked_files {
+            hash_file(dep);
+        }
+
+        if let Ok(deps) = parse_ld_dependency_file(&self.depfile_path()) {
+            for dep in deps {
+                hash_file(&dep);
+            }
+        } else {
+            for input in &self.inputs {
+                hash_file(&input.path);
+            }
+        }
+
+        hashes
+    }
+
+    fn write_input_hashes(&self) -> Result {
+        // We always run wild, so we don't need a hash file.
+        if self.linker.is_wild() {
+            return Ok(());
+        }
+
+        let path = self.hashes_path();
+        std::fs::write(&path, self.input_hashes())
+            .with_context(|| format!("Failed to write `{}`", path.display()))?;
+        Ok(())
+    }
+
+    fn depfile_path(&self) -> PathBuf {
+        add_to_path(&self.output_path, ".deps")
+    }
+
+    fn hashes_path(&self) -> PathBuf {
+        add_to_path(&self.output_path, ".hashes")
+    }
+}
+
+/// Returns `path` + `extra`.
+fn add_to_path(path: &Path, extra: &str) -> PathBuf {
+    let mut path = path.as_os_str().to_owned();
+    path.push(extra);
+    PathBuf::from(path)
 }
 
 fn add_inputs_to_command(config: &Config, inputs: &[LinkerInput], command: &mut Command) {
@@ -2590,11 +2651,13 @@ impl Assertions {
         self.verify_file_kind(&obj)?;
         verify_symbol_assertions(&obj, &self.expected_symtab_entries, obj.symbols())?;
         verify_symbol_assertions(&obj, &self.expected_dynsym_entries, obj.dynamic_symbols())?;
-        self.verify_symbols_absent(obj.symbols(), ".symtab")?;
-        self.verify_symbols_absent(obj.dynamic_symbols(), ".dynsym")?;
+        self.verify_symbols_absent(&self.no_sym, obj.symbols(), ".symtab")?;
+        self.verify_symbols_absent(&self.no_sym, obj.dynamic_symbols(), ".dynsym")?;
+        self.verify_symbols_absent(&self.no_dynsym, obj.dynamic_symbols(), ".dynsym")?;
         self.verify_comment_section(&obj, linker_used)?;
         self.verify_strings(&bytes)?;
         self.verify_load_alignment(&obj)?;
+        self.verify_dynamic_entries(&obj)?;
         Ok(())
     }
 
@@ -2671,16 +2734,17 @@ impl Assertions {
 
     fn verify_symbols_absent(
         &self,
+        absent_syms: &HashSet<String>,
         symbols: object::read::elf::ElfSymbolIterator<object::elf::FileHeader64<LittleEndian>>,
         table_name: &str,
     ) -> Result {
-        if self.no_sym.is_empty() {
+        if absent_syms.is_empty() {
             return Ok(());
         }
 
         for sym in symbols {
             if let Ok(name) = sym.name()
-                && self.no_sym.contains(name)
+                && absent_syms.contains(name)
             {
                 bail!("Symbol `{name}` was supposed to be absent, but was found in {table_name}");
             }
@@ -2701,6 +2765,103 @@ impl Assertions {
 
         Ok(())
     }
+
+    fn verify_dynamic_entries(&self, obj: &ElfFile64) -> Result {
+        if self.expected_dynamic_entries.is_empty() && self.absent_dynamic_entries.is_empty() {
+            return Ok(());
+        }
+
+        let Some(dynamic_section) = obj.section_by_name(".dynamic") else {
+            if !self.expected_dynamic_entries.is_empty() {
+                bail!(
+                    "Expected dynamic entries {:?} but no .dynamic section found",
+                    self.expected_dynamic_entries
+                );
+            }
+            return Ok(());
+        };
+
+        let data = dynamic_section.data()?;
+        let entry_size = std::mem::size_of::<object::elf::Dyn64<LittleEndian>>();
+        let mut found_tags: HashSet<String> = HashSet::new();
+
+        for chunk in data.chunks_exact(entry_size) {
+            let tag = u64::from_le_bytes(chunk[0..8].try_into().unwrap()) as u32;
+            if let Some(name) = dynamic_tag_name(tag) {
+                found_tags.insert(name.to_string());
+            }
+
+            if tag == object::elf::DT_NULL {
+                break;
+            }
+        }
+
+        for expected in &self.expected_dynamic_entries {
+            if !found_tags.contains(expected.as_str()) {
+                bail!(
+                    "Expected dynamic entry `{expected}` not found. Found: {:?}",
+                    found_tags
+                );
+            }
+        }
+
+        for absent in &self.absent_dynamic_entries {
+            if found_tags.contains(absent.as_str()) {
+                bail!("Dynamic entry `{absent}` should be absent but was found");
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn dynamic_tag_name(tag: u32) -> Option<&'static str> {
+    use object::elf::*;
+    Some(match tag {
+        DT_NULL => "DT_NULL",
+        DT_NEEDED => "DT_NEEDED",
+        DT_PLTRELSZ => "DT_PLTRELSZ",
+        DT_PLTGOT => "DT_PLTGOT",
+        DT_HASH => "DT_HASH",
+        DT_STRTAB => "DT_STRTAB",
+        DT_SYMTAB => "DT_SYMTAB",
+        DT_RELA => "DT_RELA",
+        DT_RELASZ => "DT_RELASZ",
+        DT_RELAENT => "DT_RELAENT",
+        DT_STRSZ => "DT_STRSZ",
+        DT_SYMENT => "DT_SYMENT",
+        DT_INIT => "DT_INIT",
+        DT_FINI => "DT_FINI",
+        DT_SONAME => "DT_SONAME",
+        DT_RPATH => "DT_RPATH",
+        DT_SYMBOLIC => "DT_SYMBOLIC",
+        DT_REL => "DT_REL",
+        DT_RELSZ => "DT_RELSZ",
+        DT_RELENT => "DT_RELENT",
+        DT_PLTREL => "DT_PLTREL",
+        DT_DEBUG => "DT_DEBUG",
+        DT_TEXTREL => "DT_TEXTREL",
+        DT_JMPREL => "DT_JMPREL",
+        DT_BIND_NOW => "DT_BIND_NOW",
+        DT_INIT_ARRAY => "DT_INIT_ARRAY",
+        DT_FINI_ARRAY => "DT_FINI_ARRAY",
+        DT_INIT_ARRAYSZ => "DT_INIT_ARRAYSZ",
+        DT_FINI_ARRAYSZ => "DT_FINI_ARRAYSZ",
+        DT_RUNPATH => "DT_RUNPATH",
+        DT_FLAGS => "DT_FLAGS",
+        DT_PREINIT_ARRAY => "DT_PREINIT_ARRAY",
+        DT_PREINIT_ARRAYSZ => "DT_PREINIT_ARRAYSZ",
+        DT_FLAGS_1 => "DT_FLAGS_1",
+        DT_GNU_HASH => "DT_GNU_HASH",
+        DT_RELACOUNT => "DT_RELACOUNT",
+        DT_RELCOUNT => "DT_RELCOUNT",
+        DT_VERSYM => "DT_VERSYM",
+        DT_VERDEF => "DT_VERDEF",
+        DT_VERDEFNUM => "DT_VERDEFNUM",
+        DT_VERNEED => "DT_VERNEED",
+        DT_VERNEEDNUM => "DT_VERNEEDNUM",
+        _ => return None,
+    })
 }
 
 fn verify_symbol_assertions(
@@ -2954,10 +3115,11 @@ impl Clone for LinkCommand {
             command: clone_command(&self.command),
             input_commands: self.input_commands.to_vec(),
             linker: self.linker.clone(),
-            can_skip: self.can_skip,
             invocation_mode: self.invocation_mode,
             opt_save_dir: self.opt_save_dir.clone(),
             output_path: self.output_path.clone(),
+            inputs: self.inputs.clone(),
+            config: self.config.clone(),
         }
     }
 }
@@ -3096,6 +3258,42 @@ fn should_print_timing() -> bool {
     *VALUE.get_or_init(|| std::env::var("WILD_TEST_PRINT_TIMING").is_ok())
 }
 
+impl LinkerInvocationMode {
+    fn format_arg(&self, arg: &str) -> String {
+        match self {
+            LinkerInvocationMode::Direct | LinkerInvocationMode::Script => arg.to_owned(),
+            LinkerInvocationMode::Cc => {
+                format!("-Wl,{arg}")
+            }
+        }
+    }
+}
+
+impl ErrorMatcher {
+    fn new(pattern: &str) -> Result<Self> {
+        let regex = regex::bytes::Regex::new(pattern)?;
+        Ok(Self { regex })
+    }
+
+    fn matches(&self, stderr: &[u8]) -> bool {
+        self.regex.is_match(stderr)
+    }
+}
+
+impl Display for ErrorMatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.regex.as_str())
+    }
+}
+
+impl PartialEq for ErrorMatcher {
+    fn eq(&self, other: &Self) -> bool {
+        self.regex.as_str() == other.regex.as_str()
+    }
+}
+
+impl Eq for ErrorMatcher {}
+
 fn available_linkers() -> Result<Vec<Linker>> {
     let mut linkers = vec![
         Linker::ThirdParty(ThirdPartyLinker {
@@ -3162,7 +3360,7 @@ fn run_with_config(
                 });
             let is_cache_hit = result
                 .as_ref()
-                .is_ok_and(|p| p.link_output.command.can_skip);
+                .is_ok_and(|p| p.link_output.command.can_skip());
             if !is_cache_hit && should_print_timing() {
                 println!(
                     "{program_inputs}-{config} with {linker} took {} ms",
@@ -3249,6 +3447,7 @@ fn integration_test(
         "relocation-in-non-alloc-section.s",
         "exclude-libs-all.c",
         "exclude-libs-single.c",
+        "exclude-libs-selective.c",
         "exclude-section.s",
         "common_section.c",
         "string_merging.c",
@@ -3265,6 +3464,7 @@ fn integration_test(
         "non-alloc.s",
         "gnu-unique.c",
         "symbol-versions.c",
+        "simple-version-script.c",
         "mixed-verdef-verneed.c",
         "copy-relocations.c",
         "relocation-overflow.c",
@@ -3321,7 +3521,9 @@ fn integration_test(
         "ifunc-address-equality.c",
         "ifunc-export.c",
         "stack-size.c",
-        "undefined-weak-sym.c"
+        "undefined-weak-sym.c",
+        "auxiliary.c",
+        "new-dtags.c"
     )]
     program_name: &'static str,
     #[allow(unused_variables)] setup_symlink: (),
@@ -3362,6 +3564,18 @@ fn integration_test(
 
             let mut config = config.clone();
             config.rustc_channel = test_config.rustc_channel;
+
+            let arch_name = cross_name(cross_arch);
+            config.build_dir = config
+                .base_build_dir
+                .join(format!("{}-{arch_name}", config.name));
+            std::fs::create_dir_all(&config.build_dir).with_context(|| {
+                format!(
+                    "Failed to create directory `{}`",
+                    config.build_dir.display()
+                )
+            })?;
+
             run_with_config(&program_inputs, &config, cross_arch, &linkers)?
         }
     }

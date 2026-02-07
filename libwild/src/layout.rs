@@ -1737,6 +1737,8 @@ pub(crate) struct Section {
     pub(crate) size: u64,
     pub(crate) flags: ValueFlags,
     pub(crate) is_writable: bool,
+    /// Whether to reverse the contents of this section. This is true for .ctors/.dtors sections.
+    pub(crate) reverse_contents: bool,
 }
 
 #[derive(Debug)]
@@ -3220,12 +3222,18 @@ impl Section {
         part_id: PartId,
     ) -> Result<Section> {
         let size = object_state.object.section_size(header)?;
+        let section_name = object_state.object.section_name(header)?;
+        // .ctors and .dtors sections need their contents reversed when merged into
+        // .init_array/.fini_array
+        let reverse_contents = section_name.starts_with(secnames::CTORS_SECTION_NAME)
+            || section_name.starts_with(secnames::DTORS_SECTION_NAME);
         let section = Section {
             index: section_index,
             part_id,
             size,
             flags: ValueFlags::empty(),
             is_writable: SectionFlags::from_header(header).contains(shf::WRITE),
+            reverse_contents,
         };
         Ok(section)
     }
@@ -3540,11 +3548,13 @@ impl<'data> PreludeLayoutState<'data> {
         queue: &mut LocalWorkQueue,
         scope: &Scope<'scope>,
     ) -> Result {
-        // Allocate space to store the identity of the linker in the .comment section.
-        common.allocate(
-            output_section_id::COMMENT.part_id_with_alignment(alignment::MIN),
-            self.identity.len() as u64,
-        );
+        if resources.symbol_db.args.should_write_linker_identity {
+            // Allocate space to store the identity of the linker in the .comment section.
+            common.allocate(
+                output_section_id::COMMENT.part_id_with_alignment(alignment::MIN),
+                self.identity.len() as u64,
+            );
+        }
 
         // The first entry in the symbol table must be null. Similarly, the first string in the
         // strings table must be empty.
@@ -3828,6 +3838,11 @@ impl<'data> PreludeLayoutState<'data> {
         // Keep any sections that we've said we want to keep regardless.
         for section_id in output_section_id::built_in_section_ids() {
             if section_id.built_in_details().keep_if_empty {
+                // Don't keep .relro_padding if relro is disabled.
+                if section_id == output_section_id::RELRO_PADDING && !resources.symbol_db.args.relro
+                {
+                    continue;
+                }
                 *keep_sections.get_mut(section_id) = true;
             }
         }
@@ -3980,10 +3995,13 @@ impl<'data> PreludeLayoutState<'data> {
         self.internal_symbols
             .finalise_layout(memory_offsets, resolutions_out, resources)?;
 
-        memory_offsets.increment(
-            output_section_id::COMMENT.part_id_with_alignment(alignment::MIN),
-            self.identity.len() as u64,
-        );
+        if resources.symbol_db.args.should_write_linker_identity {
+            memory_offsets.increment(
+                output_section_id::COMMENT.part_id_with_alignment(alignment::MIN),
+                self.identity.len() as u64,
+            );
+        }
+
         resources.merged_strings.for_each(|section_id, merged| {
             if merged.len() > 0 {
                 memory_offsets.increment(
@@ -4319,6 +4337,10 @@ impl EpilogueLayoutState {
             }
             if let Some(soname) = symbol_db.args.soname.as_ref() {
                 common.allocate(part_id::DYNSTR, soname.len() as u64 + 1);
+                common.allocate(part_id::DYNAMIC, dynamic_entry_size as u64);
+            }
+            for aux in &symbol_db.args.auxiliary {
+                common.allocate(part_id::DYNSTR, aux.len() as u64 + 1);
                 common.allocate(part_id::DYNAMIC, dynamic_entry_size as u64);
             }
 
@@ -4668,7 +4690,12 @@ impl<'data> ObjectLayoutState<'data> {
         }
 
         let export_all_dynamic = resources.symbol_db.output_kind == OutputKind::SharedObject
-            && (!resources.symbol_db.args.exclude_libs || !self.input.has_archive_semantics())
+            && !(self.input.has_archive_semantics()
+                && resources
+                    .symbol_db
+                    .args
+                    .exclude_libs
+                    .should_exclude(self.input.lib_name()))
             || resources.symbol_db.output_kind.needs_dynsym()
                 && resources.symbol_db.args.export_all_dynamic_symbols;
         if export_all_dynamic
@@ -5957,6 +5984,9 @@ fn layout_section_parts(
     output_order: &OutputOrder,
     args: &Args,
 ) -> OutputSectionPartMap<OutputRecordLayout> {
+    let segment_alignments =
+        compute_segment_alignments(sizes, program_segments, output_order, args);
+
     let mut file_offset = 0;
     let mut mem_offset = output_sections.base_address;
     let mut nonalloc_mem_offsets: OutputSectionMap<u64> =
@@ -5973,7 +6003,10 @@ fn layout_section_parts(
             }
             OrderEvent::SegmentStart(segment_id) => {
                 if program_segments.is_load_segment(segment_id) {
-                    let segment_alignment = program_segments.segment_alignment(segment_id, args);
+                    let segment_alignment = segment_alignments
+                        .get(&segment_id)
+                        .copied()
+                        .unwrap_or_else(|| args.loadable_segment_alignment());
                     if let Some(location) = pending_location.take() {
                         mem_offset = location.address;
                         file_offset =
@@ -6005,7 +6038,13 @@ fn layout_section_parts(
                         let alignment = part_id.alignment().min(max_alignment);
                         let merge_target = output_sections.primary_output_section(section_id);
                         let section_flags = output_sections.section_flags(merge_target);
-                        let mem_size = part_size;
+                        let mem_size = if section_id == output_section_id::RELRO_PADDING {
+                            let page_alignment = args.loadable_segment_alignment();
+                            let aligned_offset = page_alignment.align_up(mem_offset);
+                            aligned_offset - mem_offset
+                        } else {
+                            part_size
+                        };
 
                         // Note, we align up even if our size is zero, otherwise our section will
                         // start at an unaligned address.
@@ -6052,6 +6091,51 @@ fn layout_section_parts(
     }
 
     records_out
+}
+
+/// Computes the maximum alignment for each LOAD segment by examining the alignments of all sections
+/// that will be placed in that segment.
+fn compute_segment_alignments(
+    sizes: &OutputSectionPartMap<u64>,
+    program_segments: &ProgramSegments,
+    output_order: &OutputOrder,
+    args: &Args,
+) -> HashMap<ProgramSegmentId, Alignment> {
+    timing_phase!("Computing segment alignments");
+
+    let mut segment_alignments: HashMap<ProgramSegmentId, Alignment> = HashMap::new();
+    let mut active_load_segments: Vec<ProgramSegmentId> = Vec::new();
+
+    for event in output_order {
+        match event {
+            OrderEvent::SegmentStart(segment_id) => {
+                if program_segments.is_load_segment(segment_id) {
+                    // Initialize with the base loadable segment alignment
+                    segment_alignments
+                        .entry(segment_id)
+                        .or_insert_with(|| args.loadable_segment_alignment());
+                    active_load_segments.push(segment_id);
+                }
+            }
+            OrderEvent::SegmentEnd(segment_id) => {
+                active_load_segments.retain(|&id| id != segment_id);
+            }
+            OrderEvent::Section(section_id) => {
+                let part_id_range = section_id.part_id_range();
+                let max_alignment = sizes.max_alignment(part_id_range);
+
+                // Update the alignment for all active LOAD segments
+                for &segment_id in &active_load_segments {
+                    segment_alignments
+                        .entry(segment_id)
+                        .and_modify(|a| *a = (*a).max(max_alignment));
+                }
+            }
+            OrderEvent::SetLocation(_) => {}
+        }
+    }
+
+    segment_alignments
 }
 
 impl<'data> DynamicLayoutState<'data> {

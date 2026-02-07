@@ -241,6 +241,10 @@ impl SymbolIdRange {
     pub(crate) fn empty() -> SymbolIdRange {
         Self::input(SymbolId::from_usize(0), 0)
     }
+
+    pub(crate) fn contains(&self, id: SymbolId) -> bool {
+        self.start() <= id && id < self.start().add_usize(self.len())
+    }
 }
 
 impl IntoIterator for SymbolIdRange {
@@ -299,8 +303,20 @@ impl<'data> SymbolDb<'data> {
         rust_vscript.global.par_iter().for_each(|symbol| {
             let prehashed = UnversionedSymbolName::prehashed(symbol);
             if let Some(symbol_id) = self.get_unversioned(&prehashed) {
-                let symbol_atomic_flags = atomic_per_symbol_flags.get_atomic(symbol_id);
-                symbol_atomic_flags.remove(ValueFlags::DOWNGRADE_TO_LOCAL);
+                atomic_per_symbol_flags
+                    .get_atomic(symbol_id)
+                    .remove(ValueFlags::DOWNGRADE_TO_LOCAL);
+
+                // There might be alternative definitions of the symbol. We haven't yet selected
+                // which definition will be used, so we need to update all of them.
+                let bucket = &self.buckets[prehashed.hash() as usize % self.buckets.len()];
+                if let Some(alternatives) = bucket.alternative_definitions.get(&symbol_id) {
+                    for alt in alternatives {
+                        atomic_per_symbol_flags
+                            .get_atomic(*alt)
+                            .remove(ValueFlags::DOWNGRADE_TO_LOCAL);
+                    }
+                }
             }
         });
 
@@ -542,6 +558,7 @@ impl<'data> SymbolDb<'data> {
     /// Reads the symbol visibility from the original object.
     pub(crate) fn input_symbol_visibility(&self, symbol_id: SymbolId) -> Visibility {
         let file_id = self.file_id_for_symbol(symbol_id);
+        debug_assert!(self.file(file_id).symbol_id_range().contains(symbol_id));
         match &self.groups[file_id.group()] {
             Group::Prelude(_) => Visibility::Default,
             Group::Objects(parsed_input_objects) => {
@@ -1388,6 +1405,7 @@ fn load_symbols_from_file<'data>(
             args,
             version_script,
             archive_semantics: s.parsed.input.has_archive_semantics(),
+            lib_name: s.parsed.input.lib_name(),
             export_list,
             output_kind,
         }
@@ -1585,6 +1603,7 @@ struct RegularObjectSymbolLoader<'a, 'data> {
     args: &'a Args,
     version_script: &'a VersionScript<'a>,
     archive_semantics: bool,
+    lib_name: &'data [u8],
     export_list: &'a Option<ExportList<'a>>,
     output_kind: OutputKind,
 }
@@ -1650,7 +1669,7 @@ impl<'data> SymbolLoader<'data> for RegularObjectSymbolLoader<'_, 'data> {
             // first place checked for a symbol by the dynamic loader.
             || (!is_undefined && (
                 self.output_kind.is_executable()
-                || (self.args.exclude_libs && self.archive_semantics)
+                || (self.archive_semantics && self.args.exclude_libs.should_exclude(self.lib_name))
                 || (
                     self.args.b_symbolic == args::BSymbolicKind::All
                     // `-Bsymbolic-functions`
@@ -1817,15 +1836,28 @@ pub(crate) struct SymbolDebug<'a> {
 impl std::fmt::Display for SymbolDebug<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let symbol_id = self.symbol_id;
+        let definition = self.db.definition(symbol_id);
+        let file_id = self.db.file_id_for_symbol(symbol_id);
+        let file = self.db.file(file_id);
+        let symbol_id_range = file.symbol_id_range();
+
+        if !symbol_id_range.contains(symbol_id) {
+            write!(
+                f,
+                "SymbolId {symbol_id} is owned by {file_id}, but that file has range {}..{}",
+                symbol_id_range.start(),
+                symbol_id_range.start().add_usize(symbol_id_range.len())
+            )?;
+            // If ID ranges or file mappings are wrong, then the code later in this method, e.g.
+            // `id_to_offset` or `symbol_name` will panic.
+            return Ok(());
+        }
+
+        let local_index = symbol_id.to_offset(symbol_id_range);
         let symbol_name = self
             .db
             .symbol_name(symbol_id)
             .unwrap_or_else(|_| UnversionedSymbolName::new(b"??"));
-
-        let definition = self.db.definition(symbol_id);
-        let file_id = self.db.file_id_for_symbol(symbol_id);
-        let file = self.db.file(file_id);
-        let local_index = symbol_id.to_offset(file.symbol_id_range());
 
         if definition.is_undefined() {
             write!(f, "undefined ")?;
@@ -1835,7 +1867,7 @@ impl std::fmt::Display for SymbolDebug<'_> {
             match file {
                 SequencedInput::Prelude(_) => write!(f, "<unnamed internal symbol>")?,
                 SequencedInput::Object(o) => {
-                    let symbol_index = symbol_id.to_input(file.symbol_id_range());
+                    let symbol_index = symbol_id.to_input(symbol_id_range);
                     if let Some(section_name) = o
                         .parsed
                         .object

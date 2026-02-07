@@ -289,7 +289,12 @@ fn section_or_equiv<'data, 'file: 'data>(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DiffMode {
     Normal,
+    /// Do not error if getting values for a given pass fails for both sides. For example, when
+    /// trying to compare section content, but neither side has it.
     IgnoreIfAllErrors,
+    /// Do not error if the corresponding field value is missing on either side. For example, when
+    /// diffing symbols in the section, but one side doesn't contain a corresponding symbol.
+    IgnoreMissingValues,
 }
 
 pub(crate) fn diff_fields(
@@ -330,7 +335,15 @@ pub(crate) fn diff_fields(
     let mut mismatches = Vec::new();
     for k in all_keys {
         let first = ok.first().and_then(|o| o.values.get(k));
-        if ok.iter().skip(1).all(|o| o.values.get(k) != first) {
+        if ok.iter().skip(1).all(|o| {
+            let counterpart = o.values.get(k);
+            if diff_mode == DiffMode::IgnoreMissingValues
+                && (first.is_none() || counterpart.is_none())
+            {
+                return false;
+            }
+            counterpart != first
+        }) {
             let values = ok
                 .iter()
                 .map(|o| o.values.get(k).map(|v| v.join(",")).unwrap_or_default())
@@ -449,6 +462,12 @@ impl FieldValues {
             .entry(Cow::Borrowed(key))
             .or_default()
             .push(value);
+    }
+
+    pub(crate) fn sort_values(&mut self) {
+        for values in self.values.values_mut() {
+            values.sort();
+        }
     }
 }
 
@@ -640,7 +659,7 @@ fn read_dynamic_fields(obj: &Binary) -> Result<FieldValues> {
             DT_MOVETAB => (Cow::Borrowed("DT_MOVETAB"), Converter::None),
             DT_SYMINFO => (Cow::Borrowed("DT_SYMINFO"), Converter::None),
             DT_RELCOUNT => (Cow::Borrowed("DT_RELCOUNT"), Converter::None),
-            DT_AUXILIARY => (Cow::Borrowed("DT_AUXILIARY"), Converter::None),
+            DT_AUXILIARY => (Cow::Borrowed("DT_AUXILIARY"), Converter::DynStrOffset),
             other => (
                 Cow::Owned(format!("Unknown (0x{other:x})")),
                 Converter::None,

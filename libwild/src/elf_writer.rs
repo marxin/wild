@@ -1300,6 +1300,70 @@ fn write_object_section<A: Arch>(
     let out = write_section_raw(object, layout, section, buffers)?;
     let relocations = object.relocations(section.index)?;
 
+    // We need to reverse the contents and adjust relocations because .ctors/.dtors are executed in
+    // reverse order while .init_array/.fini_array are executed in forward order.
+    if section.reverse_contents {
+        const WORD_SIZE: usize = core::mem::size_of::<u64>();
+
+        if !out.is_empty() {
+            ensure!(
+                out.len().is_multiple_of(WORD_SIZE),
+                "Section size is not a multiple of word size"
+            );
+
+            let pointers: &mut [u64] = <[u64]>::mut_from_bytes(out).unwrap();
+            pointers.reverse();
+        }
+
+        // For reversed sections, we need to adjust relocation offsets.
+        // The offset transformation is: new_offset = section_size - old_offset - word_size
+        let section_size = out.len() as u64;
+
+        let result = match relocations {
+            elf::RelocationList::Rela(rela) => apply_relocations::<A, _>(
+                object,
+                out,
+                section,
+                rela.iter().map(|r| {
+                    let mut crel = Crel::from_rela(r, LittleEndian, false);
+                    crel.r_offset = section_size.saturating_sub(crel.r_offset + WORD_SIZE as u64);
+                    Ok(crel)
+                }),
+                layout,
+                table_writer,
+                trace,
+            ),
+            elf::RelocationList::Crel(crel_iter) => apply_relocations::<A, _>(
+                object,
+                out,
+                section,
+                crel_iter.map(|r| {
+                    r.map(|mut crel| {
+                        crel.r_offset =
+                            section_size.saturating_sub(crel.r_offset + WORD_SIZE as u64);
+                        crel
+                    })
+                }),
+                layout,
+                table_writer,
+                trace,
+            ),
+        };
+
+        result.with_context(|| {
+            format!(
+                "Failed to apply relocations in section `{}` of {}",
+                object.object.section_display_name(section.index),
+                object.input
+            )
+        })?;
+
+        if section.flags.needs_got() || section.flags.needs_plt() {
+            bail!("Section has GOT or PLT");
+        };
+        return Ok(());
+    }
+
     let result = match relocations {
         elf::RelocationList::Rela(rela) => apply_relocations::<A, _>(
             object,
@@ -2706,13 +2770,15 @@ fn write_merged_strings(
         }
     });
 
-    // Write linker identity into .comment section.
-    let comment_buffer =
-        buffers.get_mut(output_section_id::COMMENT.part_id_with_alignment(alignment::MIN));
-    comment_buffer
-        .split_off_mut(..prelude.identity.len())
-        .unwrap()
-        .copy_from_slice(prelude.identity.as_bytes());
+    if layout.args().should_write_linker_identity {
+        // Write linker identity into .comment section.
+        let comment_buffer =
+            buffers.get_mut(output_section_id::COMMENT.part_id_with_alignment(alignment::MIN));
+        comment_buffer
+            .split_off_mut(..prelude.identity.len())
+            .unwrap()
+            .copy_from_slice(prelude.identity.as_bytes());
+    }
 }
 
 fn write_plt_got_entries<A: Arch>(
@@ -2868,9 +2934,12 @@ fn write_epilogue_dynamic_entries(
             .dynsym_writer
             .strtab_writer
             .write_str(rpath.as_bytes());
-        table_writer
-            .dynamic
-            .write(object::elf::DT_RUNPATH, offset.into())?;
+        let rpath_tag = if layout.args().enable_new_dtags {
+            object::elf::DT_RUNPATH
+        } else {
+            object::elf::DT_RPATH
+        };
+        table_writer.dynamic.write(rpath_tag, offset.into())?;
     }
     if let Some(soname) = layout.args().soname.as_ref() {
         let offset = table_writer
@@ -2881,6 +2950,15 @@ fn write_epilogue_dynamic_entries(
             .dynamic
             .write(object::elf::DT_SONAME, offset.into())?;
         epilogue_offsets.soname.replace(offset);
+    }
+    for aux in &layout.args().auxiliary {
+        let offset = table_writer
+            .dynsym_writer
+            .strtab_writer
+            .write_str(aux.as_bytes());
+        table_writer
+            .dynamic
+            .write(object::elf::DT_AUXILIARY, offset.into())?;
     }
 
     let inputs = DynamicEntryInputs {
@@ -3883,13 +3961,37 @@ const EPILOGUE_DYNAMIC_ENTRY_WRITERS: &[DynamicEntryWriter] = &[
     ),
     DynamicEntryWriter::optional(
         object::elf::DT_FLAGS,
-        |inputs| inputs.dt_flags() != 0,
+        |inputs| inputs.args.enable_new_dtags && inputs.dt_flags() != 0,
         |inputs| inputs.dt_flags(),
     ),
     DynamicEntryWriter::optional(
         object::elf::DT_FLAGS_1,
         |inputs| inputs.dt_flags_1() != 0,
         |inputs| inputs.dt_flags_1(),
+    ),
+    DynamicEntryWriter::optional(
+        object::elf::DT_BIND_NOW,
+        |inputs| {
+            !inputs.args.enable_new_dtags
+                && (inputs.dt_flags() & u64::from(object::elf::DF_BIND_NOW)) != 0
+        },
+        |_inputs| 0,
+    ),
+    DynamicEntryWriter::optional(
+        object::elf::DT_SYMBOLIC,
+        |inputs| {
+            !inputs.args.enable_new_dtags
+                && (inputs.dt_flags() & u64::from(object::elf::DF_SYMBOLIC)) != 0
+        },
+        |_inputs| 0,
+    ),
+    DynamicEntryWriter::optional(
+        object::elf::DT_TEXTREL,
+        |inputs| {
+            !inputs.args.enable_new_dtags
+                && (inputs.dt_flags() & u64::from(object::elf::DF_TEXTREL)) != 0
+        },
+        |_inputs| 0,
     ),
     DynamicEntryWriter::optional(
         object::elf::DT_AARCH64_VARIANT_PCS,

@@ -473,7 +473,13 @@ impl<'data> RegularVersionScript<'data> {
     ) -> Result<Option<u16>> {
         let name_bytes = name.bytes();
         if let Some(version_name) = version_name {
-            if let Some(&number) = self.version_name_mapping.get(version_name) {
+            // There is a quirk that I couldn't find docs for. When a symbol has an empty version
+            // (e.g. "foo@"), the versioning is disabled and the symbol has "hidden global version"
+            // (visible as `1h <whitespaces>` in `readelf -V`), even if that symbol appears in the
+            // version script.
+            if version_name.is_empty() {
+                return Ok(Some(object::elf::VER_NDX_GLOBAL));
+            } else if let Some(&number) = self.version_name_mapping.get(version_name) {
                 return Ok(Some(number as u16 + object::elf::VER_NDX_GLOBAL));
             }
             bail!(
@@ -495,7 +501,7 @@ impl<'data> RegularVersionScript<'data> {
 }
 
 #[derive(Debug, Default)]
-/// A generaic parsed version body before version script specialization optimizations.
+/// A generic parsed version body before version script specialization optimizations.
 struct RawVersionBody<'data> {
     pub globals: Vec<ParsedSymbolMatcher<'data>>,
     pub locals: Vec<ParsedSymbolMatcher<'data>>,
@@ -587,17 +593,14 @@ fn parse_version_section<'data>(input: &mut &'data BStr) -> winnow::Result<RawVe
     loop {
         skip_comments_and_whitespace(input)?;
 
-        if input.starts_with(b"}") {
-            '}'.parse_next(input)?;
+        if try_take(input, b"}") {
             skip_comments_and_whitespace(input)?;
             break;
         }
 
-        if input.starts_with(b"global:") {
-            "global:".parse_next(input)?;
+        if try_take(input, b"global:") {
             section = Some(VersionRuleSection::Global);
-        } else if input.starts_with(b"local:") {
-            "local:".parse_next(input)?;
+        } else if try_take(input, b"local:") {
             section = Some(VersionRuleSection::Local);
         } else {
             let matcher = parse_matcher(input, false)?;
@@ -620,14 +623,11 @@ pub(crate) fn parse_matcher<'data>(
     input: &mut &'data BStr,
     without_semicolon: bool, // e.g. symbol to export passed via CLI arg
 ) -> winnow::Result<ParsedSymbolMatcher<'data>> {
-    if input.starts_with(b"extern ") {
+    if try_take(input, b"extern ") {
         let mut matchers = Vec::new();
-        b"extern ".parse_next(input)?;
-        let cxx = if input.starts_with(b"\"C++\"") {
-            b"\"C++\"".parse_next(input)?;
+        let cxx = if try_take(input, b"\"C++\"") {
             true
-        } else if input.starts_with(b"\"C\"") {
-            b"\"C\"".parse_next(input)?;
+        } else if try_take(input, b"\"C\"") {
             false
         } else {
             let unsupported_extern: String = "{".parse_to().parse_next(input)?;
@@ -642,8 +642,7 @@ pub(crate) fn parse_matcher<'data>(
         loop {
             skip_comments_and_whitespace(input)?;
 
-            if input.starts_with(b"};") {
-                b"};".parse_next(input)?;
+            if try_take(input, b"};") {
                 skip_comments_and_whitespace(input)?;
                 break;
             }
@@ -694,9 +693,7 @@ pub(crate) fn parse_matcher<'data>(
 
     skip_comments_and_whitespace(input)?;
 
-    if input.starts_with(b";") {
-        ";".parse_next(input)?;
-    }
+    try_take(input, b";");
 
     let token = token.trim_ascii_end();
 
@@ -736,6 +733,12 @@ pub(crate) fn parse_matcher<'data>(
     ))
 }
 
+/// Consumes `exact` from `input` or returns false if that's not what is next.
+fn try_take(input: &mut &BStr, mut exact: &[u8]) -> bool {
+    let result: Result<_, ContextError> = exact.parse_next(input);
+    result.is_ok()
+}
+
 fn parse_token<'input>(input: &mut &'input BStr) -> winnow::Result<&'input [u8]> {
     take_while(1.., |b| !b" (){}\n\t".contains(&b)).parse_next(input)
 }
@@ -748,6 +751,13 @@ enum GlobPatternType {
 }
 
 fn analyze_glob_pattern(pattern: &[u8]) -> GlobPatternType {
+    // Fast path for when none of the characters are present.
+    if memchr::memchr3(b'*', b'?', b'\\', pattern).is_none()
+        && memchr::memchr2(b'[', b']', pattern).is_none()
+    {
+        return GlobPatternType::Exact;
+    }
+
     let mut pattern_type = GlobPatternType::Exact;
     let mut it = pattern.iter();
 

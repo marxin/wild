@@ -15,7 +15,7 @@ repository = "https://github.com/davidlattimore/wild"
 license = "MIT OR Apache-2.0"
 version = "0.8.0"
 readme = "README.md"
-rust-version = "1.90"
+rust-version = "1.92"
 edition = "2024"
 
 # Note, the versions listed here are minimum supported versions and should only be increased when
@@ -40,10 +40,9 @@ crossbeam-utils = "0.8.18"
 crossbeam-channel = "0.5.15"
 derive_more = { version = "2.0.1", features = ["debug"] }
 dhat = { version = "0.3.3" }
-fallible-iterator = "0.3.0"
 flate2 = { version = "1.1.0", features = ["zlib-rs"] }
 foldhash = "0.2.0"
-gimli = "0.32.0"
+gimli = "0.33.0"
 git-version = "0.3.9"
 glob = "0.3.2"
 hashbrown = "0.16.0"
@@ -76,6 +75,7 @@ perf-event = "0.4.8"
 perfetto-recorder = "0.3.0"
 postcard = { version = "1.1.1", features = ["use-std"] }
 rayon = "1.5.1"
+regex = { version = "1.12.0", features = ["std"] }
 rstest = "0.26.1"
 serde = { version = "1.0.219", features = ["derive"] }
 serde-keyvalue = "0.1.0"
@@ -224,3 +224,7 @@ case_sensitive_file_extension_comparisons = "warn"
 cloned_instead_of_copied = "warn"
 cast_lossless = "warn"
 needless_pass_by_ref_mut = "warn"
+
+# We do a bit of hashing, especially in the integration tests. Optimising this speeds up tests.
+[profile.dev.package."foldhash"]
+opt-level = 2

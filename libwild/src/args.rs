@@ -78,7 +78,7 @@ pub struct Args {
     pub(crate) rpath: Option<String>,
     pub(crate) soname: Option<String>,
     pub(crate) files_per_group: Option<u32>,
-    pub(crate) exclude_libs: bool,
+    pub(crate) exclude_libs: ExcludeLibs,
     pub(crate) gc_sections: bool,
     pub(crate) should_fork: bool,
     pub(crate) mmap_output_file: bool,
@@ -96,6 +96,8 @@ pub struct Args {
     pub(crate) export_all_dynamic_symbols: bool,
     pub(crate) export_list: Vec<String>,
     pub(crate) export_list_path: Option<PathBuf>,
+    pub(crate) auxiliary: Vec<String>,
+    pub(crate) enable_new_dtags: bool,
 
     /// Symbol definitions from `--defsym` options. Each entry is (symbol_name, value_or_symbol).
     pub(crate) defsym: Vec<(String, DefsymValue)>,
@@ -126,6 +128,7 @@ pub struct Args {
     pub(crate) got_plt_syms: bool,
     pub(crate) b_symbolic: BSymbolicKind,
     pub(crate) relax: bool,
+    pub(crate) should_write_linker_identity: bool,
     pub(crate) hash_style: HashStyle,
     pub(crate) unresolved_symbols: UnresolvedSymbols,
     pub(crate) error_unresolved_symbols: bool,
@@ -195,6 +198,28 @@ pub(crate) enum HashStyle {
     Gnu,
     Sysv,
     Both,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExcludeLibs {
+    None,
+    All,
+    Some(HashSet<Box<str>>),
+}
+
+impl ExcludeLibs {
+    pub(crate) fn should_exclude(&self, lib_path: &[u8]) -> bool {
+        match self {
+            ExcludeLibs::None => false,
+            ExcludeLibs::All => true,
+            ExcludeLibs::Some(libs) => {
+                let lib_path_str = String::from_utf8_lossy(lib_path);
+                let lib_name = lib_path_str.rsplit('/').next().unwrap_or(&lib_path_str);
+
+                libs.contains(lib_name)
+            }
+        }
+    }
 }
 
 impl HashStyle {
@@ -346,7 +371,6 @@ const SILENTLY_IGNORED_SHORT_FLAGS: &[&str] = &[
 
 const IGNORED_FLAGS: &[&str] = &[
     "gdb-index",
-    "disable-new-dtags",
     "fix-cortex-a53-835769",
     "fix-cortex-a53-843419",
     "discard-all",
@@ -359,7 +383,6 @@ const DEFAULT_FLAGS: &[&str] = &[
     "no-copy-dt-needed-entries",
     "no-add-needed",
     "discard-locals",
-    "enable-new-dtags",
     "no-fatal-warnings",
 ];
 const DEFAULT_SHORT_FLAGS: &[&str] = &[
@@ -412,15 +435,17 @@ impl Default for Args {
             verbose_gc_stats: false,
             rpath: None,
             soname: None,
+            enable_new_dtags: true,
             execstack: false,
             should_fork: true,
             mmap_output_file: true,
             needs_origin_handling: false,
             needs_nodelete_handling: false,
+            should_write_linker_identity: true,
             file_write_mode: None,
             build_id: BuildIdOption::None,
             files_per_group: None,
-            exclude_libs: false,
+            exclude_libs: ExcludeLibs::None,
             no_undefined: false,
             allow_shlib_undefined: false,
             should_print_version: false,
@@ -449,6 +474,7 @@ impl Default for Args {
             z_stack_size: None,
             z_isa: None,
             max_page_size: None,
+            auxiliary: Vec::new(),
             numeric_experiments: Vec::new(),
             rpath_set: Default::default(),
         }
@@ -512,6 +538,10 @@ pub(crate) fn parse<F: Fn() -> I, S: AsRef<str>, I: Iterator<Item = S>>(input: F
     if !args.unrecognized_options.is_empty() {
         let options_list = args.unrecognized_options.join(", ");
         bail!("unrecognized option(s): {}", options_list);
+    }
+
+    if !args.auxiliary.is_empty() && args.should_output_executable {
+        bail!("-f may not be used without -shared");
     }
 
     Ok(args)
@@ -2042,13 +2072,29 @@ fn setup_argument_parser() -> ArgumentParser {
         .long("exclude-libs")
         .help("Exclude libraries")
         .execute(|args, _modifier_stack, value| {
-            if value != "ALL" {
-                // For now, just warn and ignore.
-                // FIXME: Support excluding specific libraries.
-                warn_unsupported("--exclude-libs other than ALL")?;
-                return Ok(());
+            for lib in value.split([',', ':']) {
+                if lib.is_empty() {
+                    continue;
+                }
+
+                if lib == "ALL" {
+                    args.exclude_libs = ExcludeLibs::All;
+                    return Ok(());
+                }
+
+                match &mut args.exclude_libs {
+                    ExcludeLibs::All => {}
+                    ExcludeLibs::None => {
+                        let mut set = HashSet::new();
+                        set.insert(Box::from(lib));
+                        args.exclude_libs = ExcludeLibs::Some(set);
+                    }
+                    ExcludeLibs::Some(set) => {
+                        set.insert(Box::from(lib));
+                    }
+                }
             }
-            args.exclude_libs = true;
+
             Ok(())
         });
 
@@ -2116,6 +2162,15 @@ fn setup_argument_parser() -> ArgumentParser {
         .help("Ignore files in GC stats")
         .execute(|args, _modifier_stack, value| {
             args.gc_stats_ignore.push(value.to_owned());
+            Ok(())
+        });
+
+    parser
+        .declare()
+        .long("no-identity-comment")
+        .help("Don't write the linker name and version in .comment")
+        .execute(|args, _modifier_stack| {
+            args.should_write_linker_identity = false;
             Ok(())
         });
 
@@ -2225,6 +2280,24 @@ fn setup_argument_parser() -> ArgumentParser {
         });
 
     parser
+        .declare()
+        .long("enable-new-dtags")
+        .help("Use DT_RUNPATH and DT_FLAGS/DT_FLAGS_1 (default)")
+        .execute(|args, _modifier_stack| {
+            args.enable_new_dtags = true;
+            Ok(())
+        });
+
+    parser
+        .declare()
+        .long("disable-new-dtags")
+        .help("Use DT_RPATH and individual dynamic entries instead of DT_FLAGS")
+        .execute(|args, _modifier_stack| {
+            args.enable_new_dtags = false;
+            Ok(())
+        });
+
+    parser
         .declare_with_param()
         .long("retain-symbols-file")
         .help(
@@ -2305,6 +2378,16 @@ fn setup_argument_parser() -> ArgumentParser {
 
     parser
         .declare_with_param()
+        .long("auxiliary")
+        .short("f")
+        .help("Set DT_AUXILIARY to a given value")
+        .execute(|args, _modifier_stack, value| {
+            args.auxiliary.push(value.to_owned());
+            Ok(())
+        });
+
+    parser
+        .declare_with_param()
         .long("plugin-opt")
         .help("Pass options to the plugin")
         .execute(|_args, _modifier_stack, _value| {
@@ -2342,7 +2425,7 @@ fn setup_argument_parser() -> ArgumentParser {
     parser
         .declare_with_param()
         .long("sym-info")
-        .help("Show symbol information")
+        .help("Show symbol information. Accepts symbol name or ID.")
         .execute(|args, _modifier_stack, value| {
             args.sym_info = Some(value.to_owned());
             Ok(())

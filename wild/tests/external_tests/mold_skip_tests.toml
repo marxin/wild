@@ -2,7 +2,6 @@
 reason = "These tests use unsupported options"
 tests = [
   "audit.sh",
-  "auxiliary.sh",                      # `-auxiliary` and `-f`
   "color-diagnostics.sh",
   "compress-debug-sections-zstd.sh",   # Compressed debug sections support #493
   "compress-debug-sections.sh",        # Compressed debug sections support #493
@@ -15,10 +14,8 @@ tests = [
   "emit-relocs-dead-sections.sh",
   "emit-relocs.sh",
   "exception-multiple-ehframe.sh",     # `-r`
-  "exclude-libs.sh",
   "execute-only.sh",
   "fatal-warnings.sh",                 # `-warn-common` and `-fatal-warnings`
-  "filler.sh",
   "filter.sh",
   "global-offset-table.sh",            # `-defsym=foo=_GLOBAL_OFFSET_TABLE_`
   "icf-gcc-except-table.sh",           # `--icf`
@@ -30,12 +27,9 @@ tests = [
   "linker-script-relocatable.sh",      # `--relocatable`
   "many-input-sections2.sh",           # `--relocatable`
   "nmagic.sh",
-  "no-quick-exit.sh",
   "oformat-binary.sh",
   "omagic.sh",
   "package-metadata.sh",
-  "physical-image-base.sh",
-  "print-dependencies.sh",
   "relocatable-archive.sh",
   "relocatable-c++.sh",
   "relocatable-debug-info.sh",
@@ -48,20 +42,13 @@ tests = [
   "require-defined.sh",
   "response-file-quoting.sh",
   "retain-symbols-file.sh",
-  "reverse-sections.sh",
   "rosegment.sh",
   "run.sh",
-  "section-align.sh",                  # `--section-align`
-  "section-order.sh",
-  "separate-debug-file-sort.sh",
-  "separate-debug-file.sh",
-  "shuffle-sections-seed.sh",
-  "shuffle-sections.sh",
+  "section-align.sh",                  # `--section-alignment`
   "sort-debug-info-compressed.sh",     # `-Map`
   "sort-debug-info-merged.sh",         # `-r`
   "sort-debug-info.sh",                # `-Map`
   "spare-program-headers.sh",
-  "start-stop.sh",
   "static-archive.sh",                 # `--trace`
   "synthetic-symbols.sh",              # `--image-base`
   "thin-archive.sh",                   # `--trace`
@@ -72,7 +59,6 @@ tests = [
   "undefined-glob.sh",
   "warn-common.sh",
   "warn-once.sh",
-  "zero-to-bss.sh",
 ]
 
 [skipped_groups.gdb_index]
@@ -178,6 +164,7 @@ tests = [
   "arch-x86_64-note2.sh",           # The order of sections is different.
   "arch-x86_64-plt.sh",             # We use `.got.plt`, not `.plt.got`.
   "arch-x86_64-reloc-overflow.sh",  # Different message formats
+  "auxiliary.sh",                   # Different message format
   "build-id.sh",                    # Different build ID data size
   "cmdline.sh",                     # Different message formats for unknown options.
   "comment.sh",                     # We store a different string in the comment section than mold.
@@ -216,6 +203,23 @@ tests = [
   "z-defs.sh",                      # Different message formats
 ]
 
+[skipped_groups.uncommon]
+reason = "These tests use uncommon features and are therefore likely not supported by Wild, at least for the time being."
+tests = [
+  "filler.sh",
+  "no-quick-exit.sh",
+  "physical-image-base.sh",
+  "print-dependencies.sh",
+  "reverse-sections.sh",
+  "section-order.sh",
+  "separate-debug-file-sort.sh",
+  "separate-debug-file.sh",
+  "shuffle-sections-seed.sh",
+  "shuffle-sections.sh",
+  "start-stop.sh",
+  "zero-to-bss.sh",
+]
+
 [skipped_groups.misc]
 reason = "Not grouped yet"
 tests = [
@@ -225,25 +229,20 @@ tests = [
   "common-archive.sh",
   "common-ref.sh",
   "common-symbols.sh",
-  "ctors-in-init-array.sh",
   "defsym-missing-symbol.sh",
   "demangle-cpp.sh",
-  "disable-new-dtags.sh",
   "discard-section.sh",
   "discard.sh",
   "dynamic-linker.sh",
   "glibc-2.22-bug.sh",
   "hidden-undef.sh",
   "initfirst.sh",
-  "large-alignment-dso.sh",
-  "large-alignment.sh",
   "mergeable-strings.sh",
   "missing-error.sh",
   "no-allow-shlib-undefined-circular.sh",
   "no-undefined-version.sh",
   "nocopyreloc.sh",
   "noinhibit-exec.sh",
-  "relro-alignment.sh",
   "rodata-name.sh",
   "section-attributes.sh",
   "strip.sh",
