@@ -18,16 +18,16 @@ use object::LittleEndian;
 use std::fmt::Display;
 
 #[derive(Debug)]
-pub(crate) enum Group<'data> {
+pub(crate) enum Group<'data, O: ObjectFile<'data>> {
     Prelude(Prelude<'data>),
-    Objects(&'data [SequencedInputObject<'data>]),
+    Objects(&'data [SequencedInputObject<'data, O>]),
     LinkerScripts(Vec<SequencedLinkerScript<'data>>),
     SyntheticSymbols(SyntheticSymbols),
 }
 
 #[derive(Debug)]
-pub(crate) struct SequencedInputObject<'data> {
-    pub(crate) parsed: Box<ParsedInputObject<'data>>,
+pub(crate) struct SequencedInputObject<'data, O: ObjectFile<'data>> {
+    pub(crate) parsed: Box<ParsedInputObject<'data, O>>,
     pub(crate) symbol_id_range: SymbolIdRange,
     pub(crate) file_id: FileId,
 }
@@ -40,14 +40,14 @@ pub(crate) struct SequencedLinkerScript<'data> {
 }
 
 #[derive(Debug)]
-pub(crate) enum SequencedInput<'data> {
+pub(crate) enum SequencedInput<'data, O: ObjectFile<'data>> {
     Prelude(&'data Prelude<'data>),
-    Object(&'data SequencedInputObject<'data>),
+    Object(&'data SequencedInputObject<'data, O>),
     LinkerScript(&'data SequencedLinkerScript<'data>),
     SyntheticSymbols(&'data SyntheticSymbols),
 }
 
-impl Group<'_> {
+impl<'data, O: ObjectFile<'data>> Group<'data, O> {
     // This is used when the verbose-ttttiming feature is enabled.
     #[allow(dead_code)]
     pub(crate) fn group_id(&self) -> usize {
@@ -90,7 +90,7 @@ impl Group<'_> {
 }
 
 pub(crate) fn create_groups<'data, O: ObjectFile<'data>>(
-    symbol_db: &mut SymbolDb<'data>,
+    symbol_db: &mut SymbolDb<'data, O>,
     parsed_objects: Vec<Box<ParsedInputObject<'data, O>>>,
     linker_scripts: Vec<ProcessedLinkerScript<'data>>,
 ) {
@@ -114,14 +114,7 @@ pub(crate) fn create_groups<'data, O: ObjectFile<'data>>(
     while let Some(parsed) = objects.next() {
         let file_id = FileId::new(symbol_db.next_group_index(), group_objects.len() as u32);
 
-        // TODO
-        let num_symbols_in_file = if let Some(macho_object) = &parsed.macho_object {
-            macho_object.symbols.len()
-        } else {
-            parsed.object.symbols.len()
-        };
-        dbg!(&num_symbols_in_file);
-
+        let num_symbols_in_file = parsed.num_symbols();
         group_objects.push(SequencedInputObject {
             parsed,
             symbol_id_range: SymbolIdRange::input(next_symbol_id, num_symbols_in_file),
@@ -136,7 +129,7 @@ pub(crate) fn create_groups<'data, O: ObjectFile<'data>>(
         // this is the last file or if the next file would put us over the per-group symbol limit.
         let finish_group = group_objects.len() >= max_files_per_group
             || objects.peek().is_none_or(|next_obj| {
-                num_symbols_in_group + next_obj.object.symbols.len() > symbols_per_group
+                num_symbols_in_group + next_obj.object.symbol_count() > symbols_per_group
             });
 
         if finish_group {
@@ -213,15 +206,17 @@ fn determine_max_files_per_group(args: &Args) -> usize {
 }
 
 /// Compute the total number of symbols in the supplied objects.
-fn count_symbols(objects: &[Box<ParsedInputObject>]) -> usize {
+fn count_symbols<'data, O: ObjectFile<'data>>(
+    objects: &[Box<ParsedInputObject<'data, O>>],
+) -> usize {
     verbose_timing_phase!("Count symbols");
 
     objects.iter().map(|o| o.num_symbols()).sum::<usize>()
 }
 
-struct GroupsDisplay<'a, 'data>(&'a [Group<'data>]);
+struct GroupsDisplay<'a, 'data, O: ObjectFile<'data>>(&'a [Group<'data, O>]);
 
-impl<'data> SequencedInputObject<'data> {
+impl<'data, O: ObjectFile<'data>> SequencedInputObject<'data, O> {
     pub(crate) fn symbol_name(
         &self,
         symbol_id: crate::symbol_db::SymbolId,
@@ -334,7 +329,7 @@ impl SequencedInput<'_> {
     }
 }
 
-impl Display for GroupsDisplay<'_, '_> {
+impl<'a, 'data, O: ObjectFile<'data>> Display for GroupsDisplay<'a, 'data, O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (i, group) in self.0.iter().enumerate() {
             writeln!(f, "{i}: {group}")?;
@@ -343,13 +338,13 @@ impl Display for GroupsDisplay<'_, '_> {
     }
 }
 
-impl std::fmt::Display for SequencedInputObject<'_> {
+impl<'data, O: ObjectFile<'data>> std::fmt::Display for SequencedInputObject<'data, O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self.parsed.input, f)
     }
 }
 
-impl Display for Group<'_> {
+impl<'data, O: ObjectFile<'data>> Display for Group<'data, O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Group::Prelude(_) => write!(f, "<prelude>"),

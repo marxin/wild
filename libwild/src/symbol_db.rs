@@ -73,10 +73,10 @@ use symbolic_demangle::demangle;
 use winnow::combinator::todo;
 
 #[derive(Debug)]
-pub struct SymbolDb<'data> {
+pub struct SymbolDb<'data, O: ObjectFile<'data>> {
     pub(crate) args: &'data Args,
 
-    pub(crate) groups: Vec<Group<'data>>,
+    pub(crate) groups: Vec<Group<'data, O>>,
 
     buckets: Vec<SymbolBucket<'data>>,
 
@@ -107,8 +107,8 @@ pub struct SymbolDb<'data> {
 /// are returned to the original SymbolDb when the AtomicSymbolDb is dropped. If the AtomicSymbolDb
 /// gets leaked, then the tables in the original SymbolDb will remain empty. Provides some, but not
 /// all of the APIs provided by SymbolDb.
-struct AtomicSymbolDb<'data, 'db> {
-    db: &'db mut SymbolDb<'data>,
+struct AtomicSymbolDb<'data, 'db, O: ObjectFile<'data>> {
+    db: &'db mut SymbolDb<'data, O>,
     definitions: Vec<AtomicSymbolId>,
 }
 
@@ -289,7 +289,7 @@ struct PendingSymbolHashBucket<'data> {
     versioned_symbols: Vec<PendingVersionedSymbol<'data>>,
 }
 
-impl<'data> SymbolDb<'data> {
+impl<'data, O: ObjectFile<'data>> SymbolDb<'data, O> {
     /// If the version script is optimized fur rust, we downgraded all symbols to local visibility.
     /// This promotes symbols marked for global visibility in a Rust version script back to global.
     /// Also adds the non-interposable flag to all local symbols.

@@ -4,7 +4,7 @@ use crate::error::Result;
 use crate::macho::MachOFile;
 use crate::parsing::DynamicTagValues;
 
-pub(crate) trait ObjectFile<'data>: Send + Sized {
+pub(crate) trait ObjectFile<'data>: Send + Sync + Sized {
     fn parse(data: &'data [u8], is_dynamic: bool) -> Result<Self>;
 
     fn arch(&self) -> Architecture;
