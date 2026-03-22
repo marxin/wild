@@ -5,9 +5,15 @@
 use crate::args::macho::MachOArgs;
 use crate::ensure;
 use crate::platform;
+use crate::symbol_db::Visibility;
 use object::Endian;
 use object::Endianness;
 use object::macho;
+use object::macho::N_ABS;
+use object::macho::N_EXT;
+use object::macho::N_PEXT;
+use object::macho::N_TYPE;
+use object::macho::N_WEAK_DEF;
 use object::macho::Section64;
 use object::read::macho::MachHeader;
 use object::read::macho::Nlist;
@@ -98,7 +104,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         &self,
         index: object::SymbolIndex,
     ) -> crate::error::Result<&'data <Self::Platform as platform::Platform>::SymtabEntry> {
-        todo!()
+        Ok(self.symbols.symbol(index)?)
     }
 
     fn section_size(
@@ -112,11 +118,11 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         &self,
         symbol: &<Self::Platform as platform::Platform>::SymtabEntry,
     ) -> crate::error::Result<&'data [u8]> {
-        todo!()
+        Ok(symbol.name(LE, self.symbols.strings())?)
     }
 
     fn num_sections(&self) -> usize {
-        todo!()
+        self.sections.len()
     }
 
     fn section_iter(&self) -> <Self::Platform as platform::Platform>::SectionIterator<'data> {
@@ -247,7 +253,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     fn parse_relocations(
         &self,
     ) -> crate::error::Result<<Self::Platform as platform::Platform>::RelocationSections> {
-        todo!()
+        Ok(())
     }
 
     fn symbol_version_debug(&self, symbol_index: object::SymbolIndex) -> Option<String> {
@@ -261,7 +267,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     fn dynamic_tag_values(
         &self,
     ) -> Option<<Self::Platform as platform::Platform>::DynamicTagValues<'data>> {
-        todo!()
+        None
     }
 
     fn get_version_names(
@@ -289,7 +295,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     fn verneed_table(
         &self,
     ) -> crate::error::Result<<Self::Platform as platform::Platform>::VerneedTable<'data>> {
-        todo!()
+        Ok(VerneedTable { _phantom: &[] })
     }
 
     fn process_gnu_note_section(
@@ -374,73 +380,82 @@ impl platform::SectionFlags for SectionFlags {
     }
 }
 
+// Documentation link for Nlist64 type: https://leopard-adc.pepas.com/documentation/DeveloperTools/Conceptual/MachORuntime/Reference/reference.html
 impl platform::Symbol for SymtabEntry {
     fn as_common(&self) -> Option<platform::CommonSymbol> {
         todo!()
     }
 
     fn is_undefined(&self) -> bool {
-        todo!()
+        Nlist::is_undefined(self)
     }
 
     fn is_local(&self) -> bool {
-        todo!()
+        self.n_type & N_EXT == 0
     }
 
     fn is_absolute(&self) -> bool {
-        todo!()
+        self.n_type & N_TYPE == N_ABS
     }
 
     fn is_weak(&self) -> bool {
-        todo!()
+        self.n_desc.get(LE) & N_WEAK_DEF != 0
     }
 
     fn visibility(&self) -> crate::symbol_db::Visibility {
-        todo!()
+        if self.n_type & N_PEXT != 0 {
+            Visibility::Hidden
+        } else {
+            Visibility::Default
+        }
     }
 
     fn value(&self) -> u64 {
-        todo!()
+        self.n_value.get(LE)
     }
 
     fn size(&self) -> u64 {
-        todo!()
+        // TODO
+        0
     }
 
     fn section_index(&self) -> object::SectionIndex {
-        todo!()
+        object::SectionIndex(usize::from(self.n_sect))
     }
 
     fn has_name(&self) -> bool {
-        todo!()
+        self.n_strx.get(LE) != 0
     }
 
     fn debug_string(&self) -> String {
-        todo!()
+        // TODO
+        String::new()
     }
 
     fn is_tls(&self) -> bool {
-        todo!()
+        // TODO: derive from section name
+        false
     }
 
     fn is_interposable(&self) -> bool {
-        todo!()
+        false
     }
 
     fn is_func(&self) -> bool {
-        todo!()
+        // TODO: derive from section name
+        false
     }
 
     fn is_ifunc(&self) -> bool {
-        todo!()
+        false
     }
 
     fn is_hidden(&self) -> bool {
-        todo!()
+        self.visibility() == Visibility::Hidden
     }
 
     fn is_gnu_unique(&self) -> bool {
-        todo!()
+        false
     }
 }
 
@@ -579,19 +594,19 @@ pub(crate) struct RawSymbolName<'data> {
 
 impl<'data> platform::RawSymbolName<'data> for RawSymbolName<'data> {
     fn parse(bytes: &'data [u8]) -> Self {
-        todo!()
+        Self { name: bytes }
     }
 
     fn name(&self) -> &'data [u8] {
-        todo!()
+        self.name
     }
 
     fn version_name(&self) -> Option<&'data [u8]> {
-        todo!()
+        None
     }
 
     fn is_default(&self) -> bool {
-        todo!()
+        false
     }
 }
 
@@ -602,6 +617,7 @@ impl std::fmt::Display for RawSymbolName<'_> {
 }
 
 pub(crate) struct VerneedTable<'data> {
+    // TODO
     _phantom: &'data [u8],
 }
 
@@ -762,7 +778,6 @@ impl platform::Platform for MachO {
     fn layout_resources_ext<'data>(
         groups: &[crate::grouping::Group<'data, Self>],
     ) -> Self::LayoutResourcesExt<'data> {
-        todo!()
     }
 
     fn load_object_section_relocations<'data, 'scope, A: platform::Arch<Platform = Self>>(
@@ -930,7 +945,8 @@ impl platform::Platform for MachO {
         archive_semantics: bool,
         is_undefined: bool,
     ) -> bool {
-        todo!()
+        // TODO
+        true
     }
 
     fn allocate_header_sizes(
@@ -1003,13 +1019,14 @@ impl platform::Platform for MachO {
 
     fn raw_symbol_name<'data>(
         name_bytes: &'data [u8],
-        verneed_table: &Self::VerneedTable<'data>,
-        symbol_index: object::SymbolIndex,
+        _verneed_table: &Self::VerneedTable<'data>,
+        _symbol_index: object::SymbolIndex,
     ) -> Self::RawSymbolName<'data> {
-        todo!()
+        RawSymbolName { name: name_bytes }
     }
 
     fn default_layout_rules() -> &'static [crate::layout_rules::SectionRule<'static>] {
-        todo!()
+        // TODO
+        &[]
     }
 }
