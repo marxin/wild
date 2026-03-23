@@ -1029,4 +1029,17 @@ impl platform::Platform for MachO {
         // TODO
         &[]
     }
+
+    fn build_output_order_and_program_segments<'data>(
+        custom: &crate::output_section_id::CustomSectionIds,
+        output_sections: &crate::output_section_id::OutputSections<'data, Self>,
+        secondary: &crate::output_section_map::OutputSectionMap<
+            Vec<crate::output_section_id::OutputSectionId>,
+        >,
+    ) -> (
+        crate::output_section_id::OutputOrder,
+        crate::program_segments::ProgramSegments<Self::ProgramSegmentDef>,
+    ) {
+        todo!()
+    }
 }
