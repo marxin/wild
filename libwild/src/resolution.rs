@@ -1063,7 +1063,7 @@ fn resolve_sections_for_object<'data, P: Platform>(
 #[inline(always)]
 fn resolve_section<'data, P: Platform>(
     input_section_index: SectionIndex,
-    input_section: &P::SectionHeader,
+    input_section: &'data P::SectionHeader,
     obj: &mut ResolvedObject<'data, P>,
     args: &P::Args,
     allocator: &bumpalo_herd::Member<'data>,
@@ -1099,7 +1099,8 @@ fn resolve_section<'data, P: Platform>(
             .map(|n| n.as_encoded_bytes())
     };
 
-    match rules.lookup(section_name, file_name, input_section) {
+    let section_rule_outcome = rules.lookup(section_name, file_name, input_section);
+    match section_rule_outcome {
         SectionRuleOutcome::Section(output_info) => {
             let part_id = if output_info.section_id.is_regular() {
                 output_info.section_id.part_id_with_alignment(alignment)

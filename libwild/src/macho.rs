@@ -4,8 +4,10 @@
 
 use crate::args::macho::MachOArgs;
 use crate::ensure;
+use crate::layout_rules::SectionRule;
 use crate::platform;
 use crate::symbol_db::Visibility;
+use linker_utils::elf::secnames;
 use object::Endian;
 use object::Endianness;
 use object::macho;
@@ -25,6 +27,7 @@ pub(crate) struct MachO;
 
 const LE: Endianness = Endianness::Little;
 
+type SectionHeader = Section64<crate::macho::Endianness>;
 type SectionTable<'data> = &'data [Section64<crate::macho::Endianness>];
 type SymbolTable<'data> = object::read::macho::SymbolTable<'data, macho::MachHeader64<Endianness>>;
 type SymtabEntry = object::macho::Nlist64<Endianness>;
@@ -126,7 +129,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn section_iter(&self) -> <Self::Platform as platform::Platform>::SectionIterator<'data> {
-        [].iter()
+        self.sections.iter()
     }
 
     fn enumerate_sections(
@@ -137,7 +140,8 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
             &'data <Self::Platform as platform::Platform>::SectionHeader,
         ),
     > {
-        [].iter()
+        self.sections
+            .iter()
             .enumerate()
             .map(|(i, section)| (object::SectionIndex(i), section))
     }
@@ -199,9 +203,9 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
 
     fn section_name(
         &self,
-        section_header: &<Self::Platform as platform::Platform>::SectionHeader,
+        section_header: &'data <Self::Platform as platform::Platform>::SectionHeader,
     ) -> crate::error::Result<&'data [u8]> {
-        todo!()
+        Ok(section_header.name())
     }
 
     fn raw_section_data(
@@ -239,7 +243,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         &self,
         section: &<Self::Platform as platform::Platform>::SectionHeader,
     ) -> crate::error::Result<u64> {
-        todo!()
+        Ok(u64::from(2u64.pow(section.align(LE))))
     }
 
     fn relocations(
@@ -313,9 +317,6 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct SectionHeader {}
-
 impl platform::SectionHeader for SectionHeader {
     fn is_alloc(&self) -> bool {
         todo!()
@@ -334,7 +335,8 @@ impl platform::SectionHeader for SectionHeader {
     }
 
     fn is_merge_section(&self) -> bool {
-        todo!()
+        // TODO
+        false
     }
 
     fn is_strings(&self) -> bool {
@@ -342,11 +344,13 @@ impl platform::SectionHeader for SectionHeader {
     }
 
     fn should_retain(&self) -> bool {
-        todo!()
+        // TODO
+        false
     }
 
     fn should_exclude(&self) -> bool {
-        todo!()
+        // TODO
+        false
     }
 
     fn is_group(&self) -> bool {
@@ -354,7 +358,7 @@ impl platform::SectionHeader for SectionHeader {
     }
 
     fn is_note(&self) -> bool {
-        todo!()
+        false
     }
 
     fn is_prog_bits(&self) -> bool {
@@ -834,7 +838,7 @@ impl platform::Platform for MachO {
 
     fn built_in_section_infos<'data>()
     -> Vec<crate::output_section_id::SectionOutputInfo<'data, Self>> {
-        // TODO
+        // TODO: start here
         Vec::new()
     }
 
@@ -1026,8 +1030,7 @@ impl platform::Platform for MachO {
     }
 
     fn default_layout_rules() -> &'static [crate::layout_rules::SectionRule<'static>] {
-        // TODO
-        &[]
+        DEFAULT_SECTION_RULES
     }
 
     fn build_output_order_and_program_segments<'data>(
@@ -1043,3 +1046,11 @@ impl platform::Platform for MachO {
         todo!()
     }
 }
+
+// TODO: sort properly
+const DEFAULT_SECTION_RULES: &[SectionRule<'static>] = &[
+    SectionRule::exact_section_keep(b"__text", crate::output_section_id::TEXT),
+    SectionRule::exact_section_keep(b"__data", crate::output_section_id::DATA),
+    SectionRule::exact_section_keep(b"__cstring", crate::output_section_id::STRTAB),
+    SectionRule::exact_section_keep(b"__compact_unwind", crate::output_section_id::EH_FRAME),
+];

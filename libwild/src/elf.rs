@@ -1892,7 +1892,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         self.sections.section_by_name(LittleEndian, name.as_bytes())
     }
 
-    fn section_name(&self, section: &SectionHeader) -> Result<&'data [u8]> {
+    fn section_name(&self, section: &'data SectionHeader) -> Result<&'data [u8]> {
         Ok(self.sections.section_name(LittleEndian, section)?)
     }
 

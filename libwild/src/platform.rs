@@ -717,7 +717,7 @@ pub(crate) trait ObjectFile<'data>: Sized + Send + Sync + std::fmt::Debug + 'dat
 
     fn section_name(
         &self,
-        section_header: &<Self::Platform as Platform>::SectionHeader,
+        section_header: &'data <Self::Platform as Platform>::SectionHeader,
     ) -> Result<&'data [u8]>;
 
     /// Returns the raw section data. Doesn't handle decompression.
