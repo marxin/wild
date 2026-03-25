@@ -33,7 +33,9 @@ use std::path::PathBuf;
 pub mod elf;
 pub mod macho;
 
+use crate::error::Warning;
 use crate::platform;
+use crate::platform::Args as _;
 use crate::timing_phase;
 use std::sync::atomic::AtomicI64;
 
@@ -51,7 +53,7 @@ pub const WRITE_TRACE_ENV: &str = "WILD_WRITE_TRACE";
 /// inconsistency.
 pub(crate) const WRITE_VERIFY_ALLOCATIONS_ENV: &str = "WILD_VERIFY_ALLOCATIONS";
 
-#[derive(Debug)]
+#[derive(derive_more::Debug)]
 pub struct CommonArgs {
     pub(crate) unrecognized_options: Vec<String>,
 
@@ -82,29 +84,67 @@ pub struct CommonArgs {
     /// If `Some`, then we'll time how long each phase takes. We'll also measure the specified
     /// counters, if any.
     pub(crate) time_phase_options: Option<Vec<CounterKind>>,
+
+    /// Warnings that we encountered either during argument parsing, or during subsequent linker
+    /// execution based on those arguments.
+    #[debug(skip)]
+    pub(crate) warning_callback: Box<WarningCallback>,
 }
 
+pub type WarningCallback = dyn Fn(Warning) + Send + Sync + 'static;
+
 impl Args {
-    /// Parse CLI arguments. Detects target format from `--target=<triple>`, `-m`,
-    /// or host default, then routes to the format-specific parser.
-    pub fn parse<F: Fn() -> I, S: AsRef<str>, I: Iterator<Item = S>>(input: F) -> Result<Self> {
+    /// Construct a new instance, but doesn't yet parse the arguments. The supplied arguments are
+    /// only used to help decide what kind of argument parsing we'll be doing - i.e. what platform
+    /// we're linking for. We split into two phases so that the caller can adjust defaults before
+    /// the actual parsing occurs.
+    pub fn new<F, S, I>(input: F) -> Result<Self>
+    where
+        F: Fn() -> I,
+        S: AsRef<str>,
+        I: Iterator<Item = S>,
+    {
         let mut input = input();
-        // TODO: will be used when supporting multiple formats
+
+        // TODO: Select platform based on executable name and/or the first argument.
         let _executable_name = input
             .next()
             .ok_or_else(|| crate::error!("Failed to determine executable name"))?;
-        let all_args = input.collect_vec();
 
-        #[cfg(target_os = "macos")]
-        {
-            let macho_args = macho::parse(|| all_args.iter())?;
-            Ok(Args::MachO(macho_args))
+        match PlatformKind::host() {
+            PlatformKind::Elf => Ok(Args::Elf(elf::ElfArgs::new()?)),
+            PlatformKind::MachO => Ok(Args::MachO(macho::MachOArgs::new()?)),
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let elf_args = elf::parse(|| all_args.iter())?;
-            Ok(Args::Elf(elf_args))
+    }
+
+    /// Parse CLI arguments. Detects target format from `--target=<triple>`, `-m`,
+    /// or host default, then routes to the format-specific parser.
+    pub fn parse<F: Fn() -> I, S: AsRef<str>, I: Iterator<Item = S>>(
+        &mut self,
+        input: F,
+    ) -> Result {
+        timing_phase!("Parse args");
+
+        self.common_mut().save_dir = SaveDir::new(input())?;
+
+        let mut input = input();
+
+        // Skip the program name.
+        input.next();
+
+        match self {
+            Args::Elf(args) => args.parse(input),
+            Args::MachO(args) => args.parse(input),
         }
+    }
+
+    /// Calls the callback whenever a warning is emitted. The default, if this method is never
+    /// called is to print the warning to stderr. Calling this method suppresses the default
+    /// behaviour. Warnings may be emitted while parsing arguments or later, while using the
+    /// arguments to link. As such, this method should be called after calling `new` and before
+    /// calling `parse`.
+    pub fn on_warning(&mut self, warning_callback: Box<WarningCallback>) {
+        self.common_mut().warning_callback = Box::new(warning_callback);
     }
 
     pub(crate) fn common(&self) -> &CommonArgs {
@@ -118,6 +158,21 @@ impl Args {
         match self {
             Args::Elf(elf_args) => &mut elf_args.common,
             Args::MachO(macho_args) => &mut macho_args.common,
+        }
+    }
+}
+
+enum PlatformKind {
+    Elf,
+    MachO,
+}
+
+impl PlatformKind {
+    fn host() -> Self {
+        if cfg!(target_os = "macos") {
+            PlatformKind::MachO
+        } else {
+            PlatformKind::Elf
         }
     }
 }
@@ -180,8 +235,15 @@ impl Default for CommonArgs {
             numeric_experiments: Vec::new(),
             sym_info: None,
             time_phase_options: None,
+            warning_callback: Box::new(default_warning_callback),
         }
     }
+}
+
+fn default_warning_callback(warning: Warning) {
+    eprintln!("{warning}");
+    // Suppress clippy warning. We need to confirm to an API that takes warning by value.
+    drop(warning);
 }
 
 impl CommonArgs {
@@ -215,9 +277,13 @@ impl CommonArgs {
         });
 
         // The pool might be already initialized, suppress the error intentionally.
-        let _ = ThreadPoolBuilder::new()
-            .num_threads(self.available_threads.get())
-            .build_global();
+        if self.available_threads.get() <= 1 {
+            let _ = ThreadPoolBuilder::new().use_current_thread().build_global();
+        } else {
+            let _ = ThreadPoolBuilder::new()
+                .num_threads(self.available_threads.get())
+                .build_global();
+        }
 
         Ok(ThreadPool {
             _jobserver_tokens: tokens,
@@ -269,6 +335,39 @@ impl CommonArgs {
             .copied()
             .flatten()
             .unwrap_or(default)
+    }
+
+    fn from_env() -> Result<Self> {
+        use crate::input_data::MAX_FILES_PER_GROUP;
+
+        // SAFETY: Should be called early before other descriptors are opened and
+        // so we open it before the arguments are parsed (can open a file).
+        let jobserver_client = unsafe { Client::from_env() };
+
+        let files_per_group = std::env::var(FILES_PER_GROUP_ENV)
+            .ok()
+            .map(|s| s.parse())
+            .transpose()?;
+
+        if let Some(x) = files_per_group {
+            ensure!(
+                x <= MAX_FILES_PER_GROUP,
+                "{FILES_PER_GROUP_ENV}={x} but maximum is {MAX_FILES_PER_GROUP}"
+            );
+        }
+
+        let mut common = Self {
+            files_per_group,
+            jobserver_client,
+            ..Default::default()
+        };
+
+        if std::env::var(REFERENCE_LINKER_ENV).is_ok() {
+            common.write_layout = true;
+            common.write_trace = true;
+        }
+
+        Ok(common)
     }
 }
 
@@ -621,7 +720,7 @@ impl<T: platform::Args> ArgumentParser<T> {
             if let Some(stripped) = strip_option(arg)
                 && IGNORED_FLAGS.contains(&stripped)
             {
-                warn_unsupported(arg)?;
+                args.warn_unsupported(arg)?;
                 return Ok(());
             }
 
@@ -981,19 +1080,6 @@ impl<'a, T> OptionDeclaration<'a, T, WithOptionalParam> {
 
 fn strip_option(arg: &str) -> Option<&str> {
     arg.strip_prefix("--").or(arg.strip_prefix('-'))
-}
-
-fn warn_unsupported(opt: &str) -> Result {
-    match std::env::var(WILD_UNSUPPORTED_ENV)
-        .unwrap_or_default()
-        .as_str()
-    {
-        "warn" | "" => crate::error::warning(&format!("{opt} is not yet supported")),
-        "ignore" => {}
-        "error" => bail!("{opt} is not yet supported"),
-        other => bail!("Unsupported value for {WILD_UNSUPPORTED_ENV}={other}"),
-    }
-    Ok(())
 }
 
 pub(crate) fn read_args_from_file(path: &Path) -> Result<Vec<String>> {

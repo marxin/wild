@@ -35,16 +35,17 @@ struct SaveDirState {
 }
 
 impl SaveDir {
-    pub(crate) fn new<F: Fn() -> I, S: AsRef<str>, I: Iterator<Item = S>>(
-        args: &F,
-    ) -> Result<Self> {
+    pub(crate) fn new<S: AsRef<str>, I: Iterator<Item = S>>(mut args: I) -> Result<Self> {
         let Some(dir) = save_dir_from_env()? else {
             return Ok(Self(None));
         };
 
+        // Skip program name.
+        args.next();
+
         Ok(Self(Some(SaveDirState::new(
             dir,
-            args().map(|s| s.as_ref().to_owned()).collect(),
+            args.map(|s| s.as_ref().to_owned()).collect(),
         ))))
     }
 
@@ -277,7 +278,13 @@ impl SaveDirState {
                 self.copy_file(&absolute_target, parsed_args)?;
             }
 
-            create_symlink(&target, &dest_path)?;
+            if let Err(error) = create_symlink(&target, &dest_path) {
+                // If we can't create a symlink, then fall back to copying. If that fails, then
+                // return the error from when we tried to create the symlink.
+                if std::fs::copy(&target, &dest_path).is_err() {
+                    return Err(error);
+                }
+            }
         } else {
             if let Ok(data) = FileData::new(source_path, false) {
                 match FileKind::identify_bytes(&data) {
@@ -390,6 +397,11 @@ fn create_symlink(target: &Path, dest_path: &Path) -> Result {
             )
         })?;
         Ok(())
+    }
+    #[cfg(target_os = "wasi")]
+    {
+        let _ = (target, dest_path);
+        bail!("creating symlinks on wasi not supported on stable rust");
     }
 }
 

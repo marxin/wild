@@ -68,9 +68,9 @@
 //! RunEnabled:{bool} Defaults to true. Set to false to disable execution of the resulting binary.
 //!
 //! RunDynSym:{string} If set and RunEnabled:true, then, instead of executing the binary normally,
-//! the binary is loaded as a shared library and the function specified by the string is called.
-//! The function must return an integer to indicate status (status != 42 is an error).
-//! Such run is obviously skipped if the shared library is cross compiled.
+//! the binary is loaded as a shared library and the function specified by the string is called. The
+//! function must return an integer to indicate status (status != 42 is an error). Such run is
+//! currently skipped if the shared library is cross compiled.
 //!
 //! SkipLinker:{linker-name} Don't link with the specified linker. Mostly useful if testing a flag
 //! that isn't supported by GNU ld.
@@ -84,7 +84,10 @@
 //! times - all must match.
 //!
 //! ExpectMessage:{message regex} Verifies that the linker prints the message matching the specified
-//! regex. May be specified multiple times - all must match.
+//! regex to stdout. May be specified multiple times - all must match.
+//!
+//! ExpectWarning:{message regex} Verifies that the linker emits a warning matching the specified
+//! regex. Warning must be written to stderr. May be specified multiple times - all must match.
 //!
 //! SecEquiv:{sec-name}={sec-name} Tells linker-diff that the two section names should be considered
 //! as equivalent.
@@ -174,9 +177,11 @@
 //! STB_GLOBAL or STB_WEAK).
 
 mod external_tests;
+mod tidy;
 
 use itertools::Itertools;
 use libloading::Library;
+use libtest_mimic::Trial;
 use libwild::bail;
 use libwild::ensure;
 use libwild::error;
@@ -187,8 +192,6 @@ use object::ObjectSection as _;
 use object::ObjectSymbol as _;
 use object::read::elf::ProgramHeader;
 use os_info::Type;
-use rstest::fixture;
-use rstest::rstest;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -197,7 +200,6 @@ use std::env;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Write as _;
-use std::fs::read_dir;
 use std::hash::BuildHasher as _;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -223,6 +225,116 @@ use strum::Display;
 use strum::EnumString;
 use wait_timeout::ChildExt;
 
+fn main() -> Result<std::process::ExitCode> {
+    let args = libtest_mimic::Arguments::from_args();
+    let filter = Filter::new(&args);
+    let mut tests = Vec::new();
+    collect_non_dynamic(&mut tests, &filter);
+    collect_tests(&mut tests, &filter)?;
+    external_tests::collect_tests(&mut tests, &filter)?;
+    Ok(libtest_mimic::run(&args, tests).exit_code())
+}
+
+fn collect_non_dynamic(tests: &mut Vec<Trial>, filter: &Filter) {
+    if filter.excludes("check") {
+        return;
+    }
+
+    // These tests could be #[test] style tests if we were using the standard test harness, but
+    // there's only a small number of them, so we just register them explicitly to avoid having to
+    // have a separate integration test binary.
+    tests.push(Trial::ignorable_test(
+        "check_sources_format",
+        crate::tidy::check_sources_format,
+    ));
+    tests.push(Trial::test(
+        "check_text_files",
+        crate::tidy::check_text_files,
+    ));
+}
+
+fn collect_tests(tests: &mut Vec<Trial>, filter: &Filter) -> Result {
+    let test_config = read_test_config()?;
+
+    let platform = PlatformKind::Elf;
+    let platform_name = platform.to_str();
+
+    let host_arch = get_host_architecture();
+
+    if filter.excludes(platform_name) {
+        return Ok(());
+    }
+
+    let root = src_path(platform_name);
+    let dir = std::fs::read_dir(&root)
+        .with_context(|| format!("Failed to read directory {}", root.display()))?;
+
+    let is_nextest = std::env::var("NEXTEST").is_ok();
+
+    for entry in dir {
+        let entry = entry?;
+        let path = entry.path();
+        if path.ends_with("common") {
+            continue;
+        }
+
+        let base_name = path
+            .file_name()
+            .context("Missing filename")?
+            .to_str()
+            .context("Non-UTF-8 path")?
+            .to_owned();
+
+        for &arch in ALL_ARCHITECTURES {
+            let name_prefix = format!("{platform_name}/{arch}/{base_name}");
+            if filter.excludes(&name_prefix) {
+                continue;
+            }
+
+            let primary_source_file = identify_primary_source(&path, &base_name)?;
+
+            let configs = parse_configs(
+                &primary_source_file,
+                &Config::new(
+                    base_name.clone(),
+                    platform,
+                    arch,
+                    path.clone(),
+                    &test_config,
+                ),
+            )?;
+
+            let program_inputs = ProgramInputs::new(primary_source_file.clone())?;
+
+            for config in configs {
+                if config.should_skip(arch) {
+                    continue;
+                }
+
+                let full_name = format!("{name_prefix}/{}", config.config_name);
+                let test_config = test_config.clone();
+                let program_inputs = program_inputs.clone();
+
+                // Nextest spawns a process for every test, so emitting a large number of tests that
+                // we'll ignore at runtime is a bit wasteful. There are various different criteria
+                // for ignoring tests, but the biggest one is that the architecture isn't enabled.
+                // So we just filter for that and only when running under nextest. For the normal
+                // test runner, it doesn't matter much.
+                if is_nextest && arch != host_arch && !test_config.qemu_arch.contains(&arch) {
+                    continue;
+                }
+
+                tests.push(libtest_mimic::Trial::ignorable_test(full_name, move || {
+                    run_integration_test(arch, &program_inputs, config, &test_config)
+                        .map_err(|e| libtest_mimic::Failed::from(e.to_string()))
+                }));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Set this variable to a non-empty value to check that the current platform meets the requirements
 /// for running all tests.
 const FULL_PLATFORM_REQUIRED_VAR: &str = "WILD_VERIFY_PLATFORM_REQUIREMENTS";
@@ -236,15 +348,13 @@ fn base_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn determine_build_dir(test_name: &str) -> PathBuf {
-    std::env::var("WILD_TEST_BUILD_DIR")
-        .map_or(base_dir().join("tests/build"), PathBuf::from)
-        .join(test_name)
+fn build_dir() -> PathBuf {
+    std::env::var("WILD_TEST_BUILD_DIR").map_or(base_dir().join("tests/build"), PathBuf::from)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ProgramInputs {
-    source_file: &'static str,
+    source_file: PathBuf,
 }
 
 #[derive(Debug)]
@@ -304,10 +414,12 @@ impl Linker {
         )?;
 
         if !command.can_skip() {
-            // If we're expecting errors, those errors should only occur when we link the final
-            // binary, not when we link any dependent shared objects.
+            // Clear properties that should only apply to the final link, not to intermediate
+            // artefacts like shared objects.
             let mut config = config.clone();
-            config.expect_messages = Vec::new();
+            config.expect_stderr = Vec::new();
+            config.expect_stdout = Vec::new();
+            config.should_error = false;
 
             command.run(&config)?;
             command.write_input_hashes()?;
@@ -505,11 +617,13 @@ fn is_musl_used() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
-    /// The base build directory for the test (without config name).
-    base_build_dir: PathBuf,
-    /// The build directory for this config (base_build_dir + config name).
-    build_dir: PathBuf,
-    name: String,
+    /// The directory containing the test sources.
+    test_src_dir: PathBuf,
+
+    platform: PlatformKind,
+    arch: Architecture,
+    test_name: String,
+    config_name: String,
     variant_num: Option<u32>,
     assertions: Assertions,
     linker_driver: LinkerDriver,
@@ -530,7 +644,8 @@ struct Config {
     should_run: bool,
     run_dyn_sym: Option<String>,
     should_error: bool,
-    expect_messages: Vec<ErrorMatcher>,
+    expect_stderr: Vec<ErrorMatcher>,
+    expect_stdout: Vec<ErrorMatcher>,
     support_architectures: Vec<Architecture>,
     requires_glibc: bool,
     requires_glibc_version: Option<String>,
@@ -601,6 +716,11 @@ enum Mode {
     Unspecified,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlatformKind {
+    Elf,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct DirectConfig {
     mode: Mode,
@@ -608,7 +728,7 @@ struct DirectConfig {
 
 #[derive(Debug, Clone)]
 struct ErrorMatcher {
-    regex: regex::bytes::Regex,
+    regex: regex::Regex,
 }
 
 fn get_glibc_version() -> Option<Vec<u32>> {
@@ -836,6 +956,38 @@ impl Config {
         out.deps = Vec::new();
         out
     }
+
+    fn can_use_wild_in_process(&self) -> bool {
+        self.expect_stderr.is_empty() && self.expect_stdout.is_empty()
+    }
+
+    fn source_path(&self, filename: &str) -> PathBuf {
+        let path = self.test_src_dir.join(filename);
+        if path.exists() {
+            return path;
+        }
+
+        let common_path = self.common_dir().join(filename);
+        if common_path.exists() {
+            return common_path;
+        }
+
+        // Return the path in our test source directory. It doesn't exist, but it's what we want in
+        // the error message that will eventuate.
+        path
+    }
+
+    fn common_dir(&self) -> PathBuf {
+        self.test_src_dir.parent().unwrap().join("common")
+    }
+
+    fn build_dir(&self) -> PathBuf {
+        build_dir()
+            .join(self.platform.to_str())
+            .join(self.arch.to_string())
+            .join(&self.test_name)
+            .join(&self.config_name)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -857,16 +1009,16 @@ enum Compiler {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FilenameArgumentPair {
     /// The source file to be compiled.
-    filename: String,
+    path: PathBuf,
 
     /// The arguments with which to compile the source file.
     args: ArgumentSet,
 }
 
 impl FilenameArgumentPair {
-    fn new(filename: &str, args: ArgumentSet) -> Self {
+    fn new(path: &Path, args: ArgumentSet) -> Self {
         Self {
-            filename: filename.to_string(),
+            path: path.to_owned(),
             args,
         }
     }
@@ -981,11 +1133,19 @@ impl ArgumentSet {
 }
 
 impl Config {
-    fn new(test_config: &TestConfig, build_dir: PathBuf) -> Self {
+    fn new(
+        test_name: String,
+        platform: PlatformKind,
+        arch: Architecture,
+        test_src_dir: PathBuf,
+        test_config: &TestConfig,
+    ) -> Self {
         Self {
-            base_build_dir: build_dir.clone(),
-            build_dir,
-            name: "default".to_owned(),
+            test_src_dir,
+            test_name,
+            platform,
+            arch,
+            config_name: "default".to_owned(),
             variant_num: None,
             assertions: Default::default(),
             linker_driver: LinkerDriver::Direct(DirectConfig::default()),
@@ -1006,7 +1166,8 @@ impl Config {
             should_run: true,
             run_dyn_sym: None,
             should_error: false,
-            expect_messages: Default::default(),
+            expect_stderr: Default::default(),
+            expect_stdout: Default::default(),
             cross_enabled: true,
             support_architectures: ALL_ARCHITECTURES.to_owned(),
             requires_glibc: false,
@@ -1095,7 +1256,7 @@ fn process_directive(
         "Config" | "AbstractConfig" => {
             if config != default_config {
                 let index = configs.len();
-                config_name_to_index.insert(config.name.clone(), index);
+                config_name_to_index.insert(config.config_name.clone(), index);
                 configs.push(config.clone());
             }
 
@@ -1118,7 +1279,7 @@ fn process_directive(
             if config_name_to_index.contains_key(name) {
                 bail!("Duplicate config `{name}`");
             }
-            name.clone_into(&mut config.name);
+            name.clone_into(&mut config.config_name);
         }
         "Variant" => {
             if config.variant_num.is_some() {
@@ -1135,7 +1296,7 @@ fn process_directive(
             }
             if let Some((_, rest)) = arg.split_once("./") {
                 let filename = rest.split_once(' ').map_or(rest, |(f, _)| f);
-                let src_path = src_path(filename);
+                let src_path = config.test_src_dir.join(filename);
                 config.tracked_files.push(src_path.clone());
                 let with_replaced_path =
                     arg.replace(&format!("./{filename}"), &src_path.display().to_string());
@@ -1227,14 +1388,17 @@ fn process_directive(
         }
         "Cross" => config.cross_enabled = parse_bool(arg, "Cross")?,
         "ExpectError" => {
-            config.expect_messages.push(ErrorMatcher::new(arg.trim())?);
+            config.expect_stderr.push(ErrorMatcher::new(arg.trim())?);
             config.should_error = true;
             // If there are errors, then there's nothing to run and nothing to diff.
             config.should_run = false;
             config.should_diff = false;
         }
         "ExpectMessage" => {
-            config.expect_messages.push(ErrorMatcher::new(arg.trim())?);
+            config.expect_stdout.push(ErrorMatcher::new(arg.trim())?);
+        }
+        "ExpectWarning" => {
+            config.expect_stderr.push(ErrorMatcher::new(arg.trim())?);
         }
         "SecEquiv" => config.section_equiv.push(
             arg.trim()
@@ -1266,7 +1430,7 @@ fn process_directive(
                 .map(|arg| {
                     let (filename, comp_args) = arg.split_once(":").unwrap_or((arg, ""));
                     Ok(FilenameArgumentPair::new(
-                        filename,
+                        &config.source_path(filename),
                         ArgumentSet::parse(comp_args)?,
                     ))
                 })
@@ -1339,7 +1503,7 @@ fn parse_bool(arg: &str, opt_name: &str) -> Result<bool> {
 }
 
 impl ProgramInputs {
-    fn new(source_file: &'static str) -> Result<Self> {
+    fn new(source_file: PathBuf) -> Result<Self> {
         Ok(Self { source_file })
     }
 
@@ -1352,7 +1516,7 @@ impl ProgramInputs {
         let primary = build_linker_input(
             &Dep {
                 files: vec![FilenameArgumentPair::new(
-                    self.source_file,
+                    &self.source_file,
                     ArgumentSet::empty(),
                 )],
                 input_type: InputType::Object,
@@ -1399,7 +1563,7 @@ impl ProgramInputs {
     }
 
     fn name(&self) -> &str {
-        self.source_file
+        self.source_file.file_name().unwrap().to_str().unwrap()
     }
 
     fn run_update_in_place_test(
@@ -1487,7 +1651,7 @@ impl ProgramInputs {
                 from {updated} after update-in-place linking. Original size: {original_len}, \
                 Final size: {final_len}. Diffs:\n{diffs:#?}\n\
                 Rerun with:\n{cmd}",
-                file = self.source_file,
+                file = self.name(),
                 original = original.display(),
                 updated = updated.display(),
                 original_len = original_content.len(),
@@ -1738,7 +1902,7 @@ impl Display for Program<'_> {
 
 impl Display for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.name, f)
+        Display::fmt(&self.config_name, f)
     }
 }
 
@@ -1799,9 +1963,9 @@ fn build_linker_input(
     cross_arch: Option<Architecture>,
 ) -> Result<LinkerInput> {
     if let [single_file] = dep.files.as_slice()
-        && single_file.filename.ends_with(".a")
+        && single_file.path.extension().is_some_and(|e| e == "a")
     {
-        return Ok(LinkerInput::new(src_path(&single_file.filename)));
+        return Ok(LinkerInput::new(single_file.path.clone()));
     }
 
     let config = config.config_for_deps();
@@ -1823,12 +1987,18 @@ fn build_linker_input(
         .files
         .first()
         .context("At least one file is required")?
-        .filename
-        .as_str();
+        .path
+        .file_name()
+        .unwrap();
+
     let archive_basename = Path::new(first_source_filename)
         .file_stem()
         .context("Invalid source filename")?;
-    let archive_path = config.build_dir.join(archive_basename).with_extension("a");
+
+    let archive_path = config
+        .build_dir()
+        .join(archive_basename)
+        .with_extension("a");
 
     let mut linker_input = match dep.input_type {
         InputType::Archive | InputType::ThinArchive => {
@@ -1918,7 +2088,7 @@ fn build_obj(
     input_type: InputType,
     cross_arch: Option<Architecture>,
 ) -> Result<BuiltObject> {
-    let src_path = src_path(&file.filename);
+    let src_path = file.path.clone();
 
     if input_type == InputType::LinkerScript {
         return Ok(BuiltObject {
@@ -1956,13 +2126,26 @@ fn build_obj(
 
     let mut command = Command::new(&compiler);
 
+    // We may be building multiple things with the same name in parallel from different test
+    // processes, so we change to the build directory for the current test, so that if the compiler
+    // writes temporary files to the working directory, they won't collide.
+    command.current_dir(config.build_dir());
+
     let mut compiler_args =
         if input_type == InputType::SharedObject && !config.compiler_so_args.args.is_empty() {
             config.compiler_so_args.args.clone()
         } else {
             config.compiler_args.args.clone()
         };
+
     compiler_args.extend_from_slice(&file.args.args);
+
+    let output_path = add_to_path(
+        &config.build_dir().join(file.path.file_name().unwrap()),
+        suffix,
+    );
+
+    let deps_path = add_to_path(&output_path, ".deps");
 
     match compiler_kind {
         CompilerKind::C => {
@@ -1987,6 +2170,13 @@ fn build_obj(
             add_cross_args(&mut command, &compiler_args, cross_arch);
 
             command.arg("-c");
+
+            command.arg("-iquote");
+            command.arg(config.common_dir());
+
+            command.arg("-MF");
+            command.arg(&deps_path);
+            command.arg("-MD");
         }
         CompilerKind::Rust => {
             let wild = wild_path().to_str().context("Need UTF-8 path")?.to_owned();
@@ -2039,11 +2229,13 @@ fn build_obj(
         }
     }
 
+    // If we haven't run previously or we're compiling rust code, there won't be a deps file. In
+    // that case, our deps is just the source file.
+    let deps = parse_deps_file(&deps_path).unwrap_or_else(|_| vec![src_path.to_owned()]);
+
     command.arg(&src_path);
 
     command.args(compiler_args);
-
-    let output_path = add_to_path(&config.build_dir.join(Path::new(&file.filename)), suffix);
 
     verify_path_unique_for_args(&output_path, &command)?;
 
@@ -2067,7 +2259,7 @@ fn build_obj(
         output_path.clone()
     };
 
-    if is_newer(&output_file, std::iter::once(&src_path)) {
+    if is_newer(&output_file, deps.iter()) {
         return Ok(BuiltObject {
             path: output_path,
             inputs,
@@ -2223,12 +2415,6 @@ fn get_target(compiler_args: &[String]) -> Result<&String> {
     bail!("No --target flag found");
 }
 
-fn cross_name(cross_arch: Option<Architecture>) -> String {
-    cross_arch
-        .map(|a| a.to_string())
-        .unwrap_or("host".to_string())
-}
-
 /// Newer versions of rustc pass -soname=... to the linker when writing shared objects. This sets
 /// DT_SONAME. If DT_SONAME is set, then binaries that are linked against those shared objects will
 /// use the value from DT_SONAME to populate DT_NEEDED entries in the executable. If the filename of
@@ -2304,7 +2490,7 @@ fn is_newer<A: AsRef<Path>>(output_path: &Path, mut src_paths: impl Iterator<Ite
     })
 }
 
-fn parse_ld_dependency_file(depfile: &Path) -> std::io::Result<Vec<PathBuf>> {
+fn parse_deps_file(depfile: &Path) -> std::io::Result<Vec<PathBuf>> {
     let f = std::fs::File::open(depfile)?;
     let mut r = BufReader::new(f);
 
@@ -2382,7 +2568,7 @@ impl Linker {
     }
 
     fn output_path(&self, basename: &str, config: &Config) -> PathBuf {
-        config.build_dir.join(format!("{basename}.{self}"))
+        config.build_dir().join(format!("{basename}.{self}"))
     }
 }
 
@@ -2616,45 +2802,14 @@ impl LinkCommand {
     }
 
     fn run(&mut self, config: &Config) -> Result {
-        if !config.expect_messages.is_empty() {
-            let output = self
-                .command
-                .output()
-                .with_context(|| format!("Failed to run command: {:?}", self.command))?;
-
-            if config.should_error && output.status.success() {
-                bail!(
-                    "Linker returned exit status of 0, when an error was expected. Command:\n{self}",
-                );
-            }
-
-            for expected_error in &config.expect_messages {
-                let output_stream = if config.should_error {
-                    &output.stderr
-                } else {
-                    &output.stdout
-                };
-                if !expected_error.matches(output_stream) {
-                    eprintln!(
-                        "-- stdout --\n{}\n-- stderr --\n{}\n-- end --",
-                        String::from_utf8_lossy(&output.stdout),
-                        String::from_utf8_lossy(&output.stderr),
-                    );
-                    bail!(
-                        "Linker expected to report error `{expected_error}` on stderr, but didn't. \
-                         Command:\n{self}"
-                    );
-                }
-            }
-
-            return Ok(());
-        }
-
         // If we're linking with wild and we're going to be invoking the linker directly, then just
         // use libwild as a library. This is marginally faster, since we avoid the process startup
         // costs. It also allows us to exercise wild as a library. We still exercise wild from the
         // command-line via the shell-script-based tests.
-        if self.linker.is_wild() && self.invocation_mode == LinkerInvocationMode::Direct {
+        if self.linker.is_wild()
+            && self.invocation_mode == LinkerInvocationMode::Direct
+            && config.can_use_wild_in_process()
+        {
             let args = self
                 .command
                 .get_args()
@@ -2663,8 +2818,12 @@ impl LinkCommand {
                 .context("Linker args must be valid utf-8")?;
 
             let linker = libwild::Linker::new();
-            let mut parsed_args =
-                libwild::Args::parse(|| std::iter::once("wild").chain(args.iter().copied()))?;
+            let get_args = || std::iter::once("wild").chain(args.iter().copied());
+            let mut parsed_args = libwild::Args::new(get_args)?;
+            // Tests that are checking for warnings use a subprocess to capture output. For now, we
+            // suppress warnings for tests that use libwild.
+            parsed_args.on_warning(Box::new(|_| {}));
+            parsed_args.parse(get_args)?;
 
             // This call is expected to error for all but the first call.
             let _ = libwild::setup_tracing(&parsed_args);
@@ -2682,11 +2841,18 @@ impl LinkCommand {
             .output()
             .with_context(|| format!("Failed to run command: {:?}", self.command))?;
 
-        let mut messages = String::from_utf8_lossy(&output.stdout).into_owned();
-        messages.push_str(&String::from_utf8_lossy(&output.stderr));
+        let stdout =
+            std::str::from_utf8(&output.stdout).context("stdout contained invalid UTF-8")?;
+        let stderr =
+            std::str::from_utf8(&output.stderr).context("stderr contained invalid UTF-8")?;
 
-        if !output.status.success() {
-            bail!("Linker failed:\n{messages}\nRelink with:\n{self}");
+        self.check_messages(&config.expect_stderr, "stderr", stderr, stdout, stderr)?;
+        self.check_messages(&config.expect_stdout, "stdout", stdout, stdout, stderr)?;
+
+        if config.should_error && output.status.success() {
+            bail!("Linker returned exit status of 0, when an error was expected. Command:\n{self}",);
+        } else if !config.should_error && !output.status.success() {
+            bail!("Linker failed:\n{stdout}{stderr}\nRelink with:\n{self}");
         }
 
         if let Some(save_dir) = self.opt_save_dir.as_ref() {
@@ -2695,8 +2861,30 @@ impl LinkCommand {
                 // Note, we print self.command here not self. Printing self will print the command
                 // to run using the run-with script, which doesn't exist.
                 bail!(
-                    "run-with script didn't get written. Command:\n{:?}\nOutput:\n{messages}",
+                    "run-with script didn't get written. Command:\n{:?}\nOutput:\n\
+                    {stdout}{stderr}",
                     self.command
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn check_messages(
+        &self,
+        expectations: &[ErrorMatcher],
+        output_name: &'static str,
+        output: &str,
+        stdout: &str,
+        stderr: &str,
+    ) -> Result {
+        for expected_error in expectations {
+            if !expected_error.matches(output) {
+                eprintln!("-- stdout --\n{stdout}\n-- stderr --\n{stderr}\n-- end --");
+                bail!(
+                    "Linker expected to report `{expected_error}` on {output_name}, but didn't. \
+                         Command:\n{self}"
                 );
             }
         }
@@ -2747,7 +2935,7 @@ impl LinkCommand {
             hash_file(dep);
         }
 
-        if let Ok(deps) = parse_ld_dependency_file(&self.depfile_path()) {
+        if let Ok(deps) = parse_deps_file(&self.depfile_path()) {
             for dep in deps {
                 hash_file(&dep);
             }
@@ -3379,7 +3567,7 @@ fn diff_executables(config: &Config, programs: &[Program]) -> Result {
 
 /// Diff the supplied files. The last file should be the one that we produced.
 fn diff_files(config: &Config, files: Vec<PathBuf>, display: &dyn Display) -> Result {
-    if !config.should_diff {
+    if !config.should_diff || files.len() < 2 {
         return Ok(());
     }
 
@@ -3474,10 +3662,9 @@ fn find_cross_paths(name: &str) -> HashMap<Architecture, PathBuf> {
     .collect()
 }
 
-static INIT: Once = Once::new();
-
-#[fixture]
 fn setup_symlink() {
+    static INIT: Once = Once::new();
+
     INIT.call_once(|| {
         setup_wild_ld_symlink().unwrap();
     });
@@ -3501,11 +3688,11 @@ impl LinkerInvocationMode {
 
 impl ErrorMatcher {
     fn new(pattern: &str) -> Result<Self> {
-        let regex = regex::bytes::Regex::new(pattern)?;
+        let regex = regex::Regex::new(pattern)?;
         Ok(Self { regex })
     }
 
-    fn matches(&self, stderr: &[u8]) -> bool {
+    fn matches(&self, stderr: &str) -> bool {
         self.regex.is_match(stderr)
     }
 }
@@ -3586,7 +3773,7 @@ fn run_with_config(
                     format!(
                         "Test failed: `{program_inputs}` \
                         with linker `{linker}` config `{}`",
-                        config.name
+                        config.config_name
                     )
                 });
             let is_cache_hit = result
@@ -3603,7 +3790,7 @@ fn run_with_config(
         .collect::<Result<Vec<_>>>()?;
 
     // If we expect an error, then don't try to diff or run the output.
-    if !config.expect_messages.is_empty() {
+    if config.should_error {
         return Ok(());
     }
 
@@ -3668,201 +3855,71 @@ fn run_with_config(
     Ok(())
 }
 
-#[rstest]
-fn integration_test(
-    #[values(
-        "trivial.c",
-        "trivial-main.c",
-        "trivial-dynamic.c",
-        "link_args.c",
-        "global_definitions.c",
-        "data.c",
-        "data-pointers.c",
-        "weak-vars.c",
-        "weak-vars-archive.c",
-        "weak-fns.c",
-        "weak-fns-archive.c",
-        "init_test.c",
-        "ifunc.c",
-        "init-order.c",
-        "internal-syms.c",
-        "tls.c",
-        "tlsdesc.c",
-        "tls-variant.c",
-        "weak-entry.c",
-        "no_start.c",
-        "old_init.c",
-        "custom_section.c",
-        "stack_alignment.s",
-        "got_ref_to_local.c",
-        "local_symbol_refs.s",
-        "archive_activation.c",
-        "relocation-in-non-alloc-section.s",
-        "exclude-libs-all.c",
-        "exclude-libs-single.c",
-        "exclude-libs-selective.c",
-        "exclude-section.s",
-        "common_section.c",
-        "string_merging.c",
-        "non_string_merging.c",
-        "string-merge-missing-null.c",
-        "comments.c",
-        "custom-note.s",
-        "executable_start.c",
-        "backtrace.c",
-        "eh_frame.c",
-        "symbol-priority.c",
-        "symbol-binding.c",
-        "hidden-ref.c",
-        "hidden-undef.c",
-        "trivial_asm.s",
-        "non-alloc.s",
-        "gnu-unique.c",
-        "undef-transitive.c",
-        "symbol-versions.c",
-        "common-shared.c",
-        "absolute-symbol.s",
-        "simple-version-script.c",
-        "mixed-verdef-verneed.c",
-        "copy-relocations.c",
-        "relocation-overflow.c",
-        "force-undefined.c",
-        "wrap.c",
-        "shlib-archive-activation.c",
-        "linker-script.c",
-        "linker-script-executable.c",
-        "linker-script-provide.c",
-        "linker-defined-provide.c",
-        "linker-defined-syms-shared.c",
-        "libc-ifunc.c",
-        "libc-integration.c",
-        "rust-integration.rs",
-        "rust-integration-dynamic.rs",
-        "tls-custom.c",
-        "cpp-integration.cc",
-        "rust-tls.rs",
-        "basic-comdat.s",
-        "input_does_not_exist.c",
-        "ifunc2.c",
-        "ctors.c",
-        "visibility-merging.c",
-        "tls-local-exec.c",
-        "tls-local-dynamic.c",
-        "undefined_symbols.c",
-        "undefined-with-gc-refs.c",
-        "undefined-weak-and-strong.c",
-        "shlib-undefined.c",
-        "whole_archive.c",
-        "entry_arg.c",
-        "dynamic-bss-only.c",
-        "shared-priority.c",
-        "shared.c",
-        "duplicate_strong_symbols.c",
-        "linker-plugin-lto.c",
-        "lto-no-plugin.c",
-        "lto-integration.c",
-        "preinit-array.c",
-        "exception.cc",
-        "z-defs.c",
-        "export-dynamic.c",
-        "unresolved-symbols-object.c",
-        "unresolved-symbols-shared.c",
-        "symbol-version-symver.c",
-        "symbol-version-symver-error.c",
-        "symver-shared.c",
-        "output-kind.c",
-        "entry-in-shared.c",
-        "alignment.c",
-        "hash-style.c",
-        "defsym.c",
-        "linker-script-defsym-notfound.c",
-        "tls-common.c",
-        "section-start.c",
-        "max-page-size.c",
-        "call-via-defsym.c",
-        "wrap-real-only.c",
-        "ifunc-alias.c",
-        "ifunc-address-equality.c",
-        "ifunc-export.c",
-        "stack-size.c",
-        "undefined-weak-sym.c",
-        "auxiliary.c",
-        "new-dtags.c",
-        "riscv-attr-conflict.s",
-        "riscv-call-relaxation.s",
-        "riscv-cross-object-call-relaxation.s",
-        "riscv-hi20-relaxation.s",
-        "riscv-hi20-lui-deletion.s",
-        "segment-end-syms.c",
-        "linker-script-filename-match.c",
-        "tls-apx-relocs.s",
-        "as-needed-weak.c",
-        "linker-script-unclosed-comment.c",
-        "linker-script-assert-pass.c",
-        "linker-script-assert-fail.c",
-        "linker-script-glob.c",
-        "execstack.s"
-    )]
-    program_name: &'static str,
-    #[allow(unused_variables)] setup_symlink: (),
-) -> Result {
-    let build_dir = determine_build_dir(program_name);
-    std::fs::create_dir_all(&build_dir)
-        .with_context(|| format!("Failed to create directory `{}`", build_dir.display()))?;
-
-    let program_inputs = ProgramInputs::new(program_name)?;
+fn run_integration_test(
+    arch: Architecture,
+    program_inputs: &ProgramInputs,
+    mut config: Config,
+    test_config: &TestConfig,
+) -> Result<libtest_mimic::Completion> {
+    setup_symlink();
 
     let linkers = available_linkers()?;
 
-    let test_config = read_test_config()?;
-
     let filename = &program_inputs.source_file;
-    let configs = parse_configs(&src_path(filename), &Config::new(&test_config, build_dir))?;
 
     let host_arch = get_host_architecture();
 
-    for &arch in ALL_ARCHITECTURES {
-        if arch != host_arch && !test_config.qemu_arch.contains(&arch) {
-            continue;
+    if arch != host_arch && !test_config.qemu_arch.contains(&arch) {
+        return Ok(libtest_mimic::Completion::ignored_with(
+            "Architecture disabled",
+        ));
+    }
+
+    let cross_arch = (arch != get_host_architecture()).then_some(arch);
+
+    config.rustc_channel = test_config.rustc_channel;
+
+    if !test_config.allow_rust_musl_target && config.requires_rust_musl {
+        return Ok(libtest_mimic::Completion::ignored_with(
+            "Test doesn't support musl-libc",
+        ));
+    }
+
+    if let Err(error) = verify_platform_requirements(&config, cross_arch, Path::new(filename)) {
+        if full_test_platform_required() {
+            return Err(error);
         }
+        return Ok(libtest_mimic::Completion::ignored_with(error.to_string()));
+    }
 
-        let cross_arch = (arch != get_host_architecture()).then_some(arch);
+    std::fs::create_dir_all(config.build_dir()).with_context(|| {
+        format!(
+            "Failed to create directory `{}`",
+            config.build_dir().display()
+        )
+    })?;
 
-        let config_it = configs.iter().filter(|config| !config.should_skip(arch));
+    run_with_config(program_inputs, &config, cross_arch, &linkers)?;
 
-        for config in config_it {
-            let mut config = config.clone();
-            config.rustc_channel = test_config.rustc_channel;
+    Ok(libtest_mimic::Completion::Completed)
+}
 
-            if !test_config.allow_rust_musl_target && config.requires_rust_musl {
-                continue;
-            }
+/// Determine the name of the primary source file for a test source directory.
+fn identify_primary_source(test_src_dir: &Path, test_name: &str) -> Result<PathBuf> {
+    let extensions = &["rs", "c", "cc", "s"];
 
-            if let Err(error) =
-                verify_platform_requirements(&config, cross_arch, Path::new(filename))
-            {
-                if full_test_platform_required() {
-                    return Err(error);
-                }
-                continue;
-            }
-
-            let arch_name = cross_name(cross_arch);
-            config.build_dir = config
-                .base_build_dir
-                .join(format!("{}-{arch_name}", config.name));
-            std::fs::create_dir_all(&config.build_dir).with_context(|| {
-                format!(
-                    "Failed to create directory `{}`",
-                    config.build_dir.display()
-                )
-            })?;
-
-            run_with_config(&program_inputs, &config, cross_arch, &linkers)?
+    for ext in extensions {
+        let path = test_src_dir.join(format!("{test_name}.{ext}"));
+        if path.exists() {
+            return Ok(path);
         }
     }
 
-    Ok(())
+    bail!(
+        "{} must contain {test_name}.{{{}}}",
+        test_src_dir.display(),
+        extensions.join(",")
+    );
 }
 
 /// Verifies that the platform that we're running on meets the requirements for the supplied test
@@ -4039,141 +4096,36 @@ fn read_test_config() -> Result<TestConfig> {
     Ok(config)
 }
 
-#[cfg(test)]
-mod tidy {
-    use super::*;
-
-    #[test]
-    fn check_sources_format() {
-        if std::env::var_os("WILD_TEST_IGNORE_FORMAT").is_some() {
-            return;
+impl PlatformKind {
+    fn to_str(self) -> &'static str {
+        match self {
+            PlatformKind::Elf => "elf",
         }
+    }
+}
 
-        let extensions = ["c", "cc", "h"];
-        let sources_path = format!("{}/tests/sources", env!("CARGO_MANIFEST_DIR"));
-        let files_iter = read_dir(&sources_path).unwrap().filter_map(|entry| {
-            let path = entry.as_ref().unwrap().path();
-            if path.is_file()
-                && path
-                    .extension()
-                    .is_some_and(|extension| extensions.contains(&extension.to_str().unwrap()))
-            {
-                Some(path)
-            } else {
-                None
-            }
-        });
+struct Filter {
+    filter: Option<String>,
+}
 
-        let clang_format_out = Command::new("clang-format")
-            .arg("--dry-run")
-            .arg("-Werror")
-            // Undocumented option that forces the colours: https://github.com/llvm/llvm-project/issues/119224
-            .arg("--color")
-            .args(files_iter)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .expect("Failed to spawn `clang-format`, is it installed?");
-
-        if !clang_format_out.status.success() {
-            let stdout = String::from_utf8_lossy(&clang_format_out.stdout);
-            let stderr = String::from_utf8_lossy(&clang_format_out.stderr);
-            let mut out = String::with_capacity(stdout.len() + stderr.len() + 1);
-            if !stdout.is_empty() {
-                out.push_str(&stdout);
-                if !stderr.is_empty() {
-                    out.push('\n');
-                }
-            }
-            if !stderr.is_empty() {
-                out.push_str(&stderr);
-            }
-            let clang_out = Command::new("clang-format")
-                .arg("--version")
-                .output()
-                .expect("Failed to spawn `clang-format --version`");
-            let clang_version = String::from_utf8_lossy(&clang_out.stdout);
-            let version_no_endline = clang_version.trim_end_matches('\n');
-            panic!(
-                "clang-format ({version_no_endline}) check failed:\n{out}\nRun `clang-format -i {sources_path}/*.{{{extensions_str}}}` to fix it.",
-                extensions_str = extensions.join(",")
-            )
+impl Filter {
+    fn new(args: &libtest_mimic::Arguments) -> Self {
+        Self {
+            filter: args.filter.clone(),
         }
     }
 
-    #[test]
-    fn check_text_files() -> Result {
-        const EXCLUDE_DIR: &[&str] = &[
-            "target",
-            "build",
-            "external_test_suites",
-            "fakes-debug",
-            "fakes",
-        ];
+    /// Returns whether we should exclude test patterns that start with `prefix`. This is mostly of
+    /// benefit to nextest, since it runs a separate process for each test, so we need to make sure
+    /// that we can minimise the work required to find the available tests. If we don't do
+    /// filtering, then `cargo nextest run` can take around 8 seconds instead of 0.8 seconds because
+    /// we end up spending more time repeatedly finding all the tests than we do actually running
+    /// the tests.
+    fn excludes(&self, prefix: &str) -> bool {
+        let Some(filter) = self.filter.as_ref() else {
+            return false;
+        };
 
-        fn verify_path(path: &Path, problems: &mut Vec<String>) -> Result {
-            if EXCLUDE_DIR.iter().any(|e| path.ends_with(e)) {
-                return Ok(());
-            }
-
-            if path.is_dir() {
-                for entry in read_dir(path)
-                    .with_context(|| format!("Failed to read directory {}", path.display()))?
-                {
-                    let entry = entry?;
-                    let file_name = entry.file_name();
-                    let Some(file_name) = file_name.to_str() else {
-                        continue;
-                    };
-
-                    // Ignore hidden files / directories.
-                    if file_name.starts_with('.') {
-                        continue;
-                    }
-
-                    verify_path(&entry.path(), problems)?;
-                }
-            } else if path.is_symlink() {
-                // Ignore symlinks.
-            } else {
-                let content = std::fs::read(path)
-                    .with_context(|| format!("Failed to read file {}", path.display()))?;
-
-                let is_valid_utf8 = std::str::from_utf8(&content).is_ok();
-                let is_text = is_valid_utf8 && !content.contains(&0);
-
-                if is_text {
-                    if content.contains(&b'\r') {
-                        problems.push(format!(
-                            "The file {} uses Windows line-endings. Please convert it to Unix-style.",
-                            path.display()
-                        ));
-                    }
-
-                    let allow_no_trailing_newline =
-                        content.is_empty() || path.extension().is_some_and(|ext| ext == "json");
-
-                    if !allow_no_trailing_newline && !content.ends_with(b"\n") {
-                        problems.push(format!(
-                            "The file {} is missing a trailing newline",
-                            path.display()
-                        ));
-                    }
-                }
-            }
-            Ok(())
-        }
-
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-
-        let mut problems = Vec::new();
-        verify_path(root, &mut problems)?;
-
-        if !problems.is_empty() {
-            bail!("{}", problems.join("\n"))
-        }
-
-        Ok(())
+        !filter.starts_with(prefix) && !prefix.starts_with(filter)
     }
 }

@@ -13,7 +13,6 @@ use crate::ensure;
 use crate::error;
 use crate::error::Context as _;
 use crate::error::Result;
-use crate::error::warning;
 use crate::file_kind::FileKind;
 use crate::grouping::Group;
 use crate::input_data::InputBytes;
@@ -332,6 +331,12 @@ impl platform::Platform for Elf {
             }
             crate::arch::Architecture::LoongArch64 => {
                 linker.link_for_arch::<Elf, crate::elf_loongarch64::ElfLoongArch64>(args)
+            }
+            crate::arch::Architecture::Unsupported => {
+                bail!(
+                    "No default target architecture known for host platform. \
+                    Please specify an architecture with -m"
+                )
             }
         }
     }
@@ -5118,7 +5123,7 @@ impl CopyRelocationInfo {
         }
 
         if !self.is_weak {
-            warning(&format!(
+            resources.symbol_db.warning(format!(
                 "Multiple non-weak symbols at the same address have copy relocations: {}, {}",
                 resources.symbol_debug(self.symbol_id),
                 resources.symbol_debug(symbol_id)

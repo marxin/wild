@@ -3,6 +3,7 @@ use crate::Result;
 use crate::alignment::Alignment;
 use crate::args::DefsymValue;
 use crate::bail;
+use crate::error::Warning;
 use crate::grouping::Group;
 use crate::input_data::FileLoader;
 use crate::input_data::InputBytes;
@@ -1020,6 +1021,11 @@ pub(crate) trait ProgramSegmentDef: Copy + Send + Sync + Display + 'static {
 pub(crate) trait BuiltInSectionDetails: Send + Sync + 'static {}
 
 pub(crate) trait Args: std::fmt::Debug + Send + Sync + 'static {
+    fn parse<S, I>(&mut self, input: I) -> Result
+    where
+        S: AsRef<str>,
+        I: Iterator<Item = S>;
+
     fn gc_stats_output_file(&self) -> Option<&Path> {
         None
     }
@@ -1156,4 +1162,25 @@ pub(crate) trait Args: std::fmt::Debug + Send + Sync + 'static {
     fn relocation_model(&self) -> crate::args::RelocationModel;
 
     fn should_output_executable(&self) -> bool;
+
+    fn warning(&self, message: impl Into<String>) {
+        (self.common().warning_callback)(Warning::new(message.into()));
+    }
+
+    fn warn_unsupported(&self, opt: &str) -> Result {
+        use crate::args::WILD_UNSUPPORTED_ENV;
+
+        let message = format!("{opt} is not yet supported");
+
+        match std::env::var(WILD_UNSUPPORTED_ENV)
+            .unwrap_or_default()
+            .as_str()
+        {
+            "warn" | "" => self.warning(message),
+            "ignore" => {}
+            "error" => bail!("{message}"),
+            other => bail!("Unsupported value for {WILD_UNSUPPORTED_ENV}={other}"),
+        }
+        Ok(())
+    }
 }
