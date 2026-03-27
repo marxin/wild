@@ -59,7 +59,7 @@ impl platform::Args for MachOArgs {
     }
 
     fn should_strip_all(&self) -> bool {
-        todo!()
+        false
     }
 
     fn entry_symbol_name<'a>(&'a self, linker_script_entry: Option<&'a [u8]>) -> &'a [u8] {

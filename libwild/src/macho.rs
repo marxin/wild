@@ -6,12 +6,13 @@ use crate::OutputKind;
 use crate::alignment;
 use crate::args::macho::MachOArgs;
 use crate::ensure;
+use crate::error;
 use crate::layout_rules::SectionKind;
 use crate::layout_rules::SectionRule;
 use crate::output_section_id;
 use crate::output_section_id::NUM_BUILT_IN_SECTIONS;
-use crate::output_section_id::SectionOutputInfo;
 use crate::output_section_id::SectionName;
+use crate::output_section_id::SectionOutputInfo;
 use crate::platform;
 use crate::symbol_db::Visibility;
 use linker_utils::elf::secnames;
@@ -29,6 +30,7 @@ use object::read::macho::Nlist;
 use object::read::macho::Section;
 use object::read::macho::Segment;
 use std::default;
+use winnow::combinator::todo;
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct MachO;
@@ -39,6 +41,7 @@ type SectionHeader = Section64<crate::macho::Endianness>;
 type SectionTable<'data> = &'data [Section64<crate::macho::Endianness>];
 type SymbolTable<'data> = object::read::macho::SymbolTable<'data, macho::MachHeader64<Endianness>>;
 type SymtabEntry = object::macho::Nlist64<Endianness>;
+type Relocation = object::macho::Relocation<Endianness>;
 
 #[derive(derive_more::Debug)]
 pub(crate) struct File<'data> {
@@ -69,11 +72,6 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
                 ensure!(sections.is_none(), "At most one segment command expected");
                 let section_list = segment_command.sections(LE, segment_data)?;
                 sections = Some(section_list);
-                for section in section_list {
-                    for r in section.relocations(LE, input)? {
-                        dbg!(r.info(LE));
-                    }
-                }
             }
         }
 
@@ -122,7 +120,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         &self,
         header: &<Self::Platform as platform::Platform>::SectionHeader,
     ) -> crate::error::Result<u64> {
-        todo!()
+        Ok(header.size.get(LE))
     }
 
     fn symbol_name(
@@ -158,7 +156,9 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         &self,
         index: object::SectionIndex,
     ) -> crate::error::Result<&'data <Self::Platform as platform::Platform>::SectionHeader> {
-        todo!()
+        self.sections
+            .get(index.0)
+            .ok_or(error!("section index out of range"))
     }
 
     fn section_by_name(
@@ -251,7 +251,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         &self,
         section: &<Self::Platform as platform::Platform>::SectionHeader,
     ) -> crate::error::Result<u64> {
-        Ok(u64::from(2u64.pow(section.align(LE))))
+        Ok(2u64.pow(section.align(LE)))
     }
 
     fn relocations(
@@ -259,7 +259,13 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         index: object::SectionIndex,
         relocations: &<Self::Platform as platform::Platform>::RelocationSections,
     ) -> crate::error::Result<<Self::Platform as platform::Platform>::RelocationList<'data>> {
-        todo!()
+        Ok(RelocationList {
+            relocations: self
+                .sections
+                .get(index.0)
+                .ok_or(error!("section index out of range"))?
+                .relocations(LE, self.data)?,
+        })
     }
 
     fn parse_relocations(
@@ -761,12 +767,12 @@ pub(crate) struct DynamicTagValues<'data> {
 
 #[derive(Debug)]
 pub(crate) struct RelocationList<'data> {
-    phantom: &'data [u8],
+    relocations: &'data [Relocation],
 }
 
 impl<'data> platform::RelocationList<'data> for RelocationList<'data> {
     fn num_relocations(&self) -> usize {
-        todo!()
+        self.relocations.len()
     }
 }
 
@@ -867,7 +873,8 @@ impl platform::Platform for MachO {
     }
 
     fn section_attributes(header: &Self::SectionHeader) -> Self::SectionAttributes {
-        todo!()
+        // TODO
+        Self::SectionAttributes {}
     }
 
     fn apply_force_keep_sections(
@@ -899,9 +906,7 @@ impl platform::Platform for MachO {
         todo!()
     }
 
-    fn finalise_find_required_sections(groups: &[crate::layout::GroupState<Self>]) {
-        todo!()
-    }
+    fn finalise_find_required_sections(groups: &[crate::layout::GroupState<Self>]) {}
 
     fn activate_dynamic<'data>(
         state: &mut crate::layout::DynamicLayoutState<'data, Self>,
@@ -915,7 +920,6 @@ impl platform::Platform for MachO {
         common: &mut crate::layout::CommonGroupState<'data, Self>,
         resources: &crate::layout::GraphResources<'data, 'scope, Self>,
     ) {
-        todo!()
     }
 
     fn finalise_sizes_dynamic<'data>(
@@ -977,7 +981,11 @@ impl platform::Platform for MachO {
         section: crate::layout::Section,
         scope: &rayon::Scope<'scope>,
     ) -> crate::error::Result {
-        todo!()
+        for rel in state.relocations(section.index)?.relocations {
+            dbg!(rel.info(LE));
+        }
+        // TODO
+        Ok(())
     }
 
     fn load_object_debug_relocations<'data, 'scope, A: platform::Arch<Platform = Self>>(
@@ -1044,7 +1052,7 @@ impl platform::Platform for MachO {
         'data: 'files,
         'data: 'states,
     {
-        todo!()
+        Ok(())
     }
 
     fn load_exception_frame_data<'data, 'scope, A: platform::Arch<Platform = Self>>(
@@ -1066,7 +1074,7 @@ impl platform::Platform for MachO {
         resources: &'scope crate::layout::GraphResources<'data, 'scope, Self>,
         scope: &rayon::Scope<'scope>,
     ) -> crate::error::Result {
-        todo!()
+        Ok(())
     }
 
     fn new_epilogue_layout(
@@ -1074,7 +1082,6 @@ impl platform::Platform for MachO {
         output_kind: crate::output_kind::OutputKind,
         dynamic_symbol_definitions: &mut [crate::layout::DynamicSymbolDefinition<'_, Self>],
     ) -> Self::EpilogueLayoutExt {
-        todo!()
     }
 
     fn apply_non_addressable_indexes_epilogue(
@@ -1194,7 +1201,7 @@ impl platform::Platform for MachO {
         common: &mut crate::layout::CommonGroupState<Self>,
         symbol_db: &crate::symbol_db::SymbolDb<Self>,
     ) {
-        todo!()
+        // TODO
     }
 
     fn finalise_prelude_layout<'data>(
