@@ -88,9 +88,7 @@ pub(crate) const NOTE_GNU_PROPERTY: OutputSectionId =
     part_id::NOTE_GNU_PROPERTY.output_section_id();
 pub(crate) const NOTE_GNU_BUILD_ID: OutputSectionId =
     part_id::NOTE_GNU_BUILD_ID.output_section_id();
-
 pub(crate) const SYMTAB_LOCAL: OutputSectionId = part_id::SYMTAB_LOCAL.output_section_id();
-#[allow(dead_code)]
 pub(crate) const SYMTAB_GLOBAL: OutputSectionId = part_id::SYMTAB_GLOBAL.output_section_id();
 pub(crate) const RELA_DYN_RELATIVE: OutputSectionId =
     part_id::RELA_DYN_RELATIVE.output_section_id();
@@ -98,6 +96,7 @@ pub(crate) const RELA_DYN_GENERAL: OutputSectionId = part_id::RELA_DYN_GENERAL.o
 pub(crate) const RISCV_ATTRIBUTES: OutputSectionId = part_id::RISCV_ATTRIBUTES.output_section_id();
 pub(crate) const RELRO_PADDING: OutputSectionId = part_id::RELRO_PADDING.output_section_id();
 
+// Regular sections copied from the input objects.
 pub(crate) const RODATA: OutputSectionId = OutputSectionId::regular(0);
 pub(crate) const INIT_ARRAY: OutputSectionId = OutputSectionId::regular(1);
 pub(crate) const FINI_ARRAY: OutputSectionId = OutputSectionId::regular(2);

@@ -3,9 +3,15 @@
 #![allow(unused)]
 
 use crate::OutputKind;
+use crate::alignment;
 use crate::args::macho::MachOArgs;
 use crate::ensure;
+use crate::layout_rules::SectionKind;
 use crate::layout_rules::SectionRule;
+use crate::output_section_id;
+use crate::output_section_id::NUM_BUILT_IN_SECTIONS;
+use crate::output_section_id::SectionOutputInfo;
+use crate::output_section_id::SectionName;
 use crate::platform;
 use crate::symbol_db::Visibility;
 use linker_utils::elf::secnames;
@@ -22,6 +28,7 @@ use object::read::macho::MachHeader;
 use object::read::macho::Nlist;
 use object::read::macho::Section;
 use object::read::macho::Segment;
+use std::default;
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct MachO;
@@ -597,9 +604,155 @@ impl platform::ProgramSegmentDef for ProgramSegmentDef {
     }
 }
 
-pub(crate) struct BuiltInSectionDetails {}
+pub(crate) struct BuiltInSectionDetails {
+    pub(crate) kind: SectionKind<'static>,
+}
 
 impl platform::BuiltInSectionDetails for BuiltInSectionDetails {}
+
+const DEFAULT_DEFS: BuiltInSectionDetails = BuiltInSectionDetails {
+    kind: SectionKind::Primary(SectionName(&[])),
+};
+
+const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
+    let mut defs: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] =
+        [DEFAULT_DEFS; NUM_BUILT_IN_SECTIONS];
+
+    // A section into which we write headers.
+    defs[output_section_id::FILE_HEADER.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(b"")),
+    };
+    defs[output_section_id::PROGRAM_HEADERS.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::PROGRAM_HEADERS_SECTION_NAME)),
+    };
+    defs[output_section_id::SECTION_HEADERS.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::SECTION_HEADERS_SECTION_NAME)),
+    };
+    defs[output_section_id::SHSTRTAB.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::SHSTRTAB_SECTION_NAME)),
+    };
+    defs[output_section_id::STRTAB.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::STRTAB_SECTION_NAME)),
+    };
+    defs[output_section_id::GOT.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::GOT_SECTION_NAME)),
+    };
+    defs[output_section_id::PLT_GOT.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::PLT_GOT_SECTION_NAME)),
+    };
+    defs[output_section_id::RELA_PLT.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::RELA_PLT_SECTION_NAME)),
+    };
+    defs[output_section_id::EH_FRAME.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::EH_FRAME_SECTION_NAME)),
+    };
+    defs[output_section_id::EH_FRAME_HDR.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::EH_FRAME_HDR_SECTION_NAME)),
+    };
+    defs[output_section_id::SFRAME.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::SFRAME_SECTION_NAME)),
+    };
+    defs[output_section_id::DYNAMIC.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::DYNAMIC_SECTION_NAME)),
+    };
+    defs[output_section_id::HASH.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::HASH_SECTION_NAME)),
+    };
+    defs[output_section_id::GNU_HASH.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::GNU_HASH_SECTION_NAME)),
+    };
+    defs[output_section_id::DYNSYM.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::DYNSYM_SECTION_NAME)),
+    };
+    defs[output_section_id::DYNSTR.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::DYNSTR_SECTION_NAME)),
+    };
+    defs[output_section_id::INTERP.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::INTERP_SECTION_NAME)),
+    };
+    defs[output_section_id::GNU_VERSION.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::GNU_VERSION_SECTION_NAME)),
+    };
+    defs[output_section_id::GNU_VERSION_D.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::GNU_VERSION_D_SECTION_NAME)),
+    };
+    defs[output_section_id::GNU_VERSION_R.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::GNU_VERSION_R_SECTION_NAME)),
+    };
+    defs[output_section_id::NOTE_GNU_PROPERTY.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::NOTE_GNU_PROPERTY_SECTION_NAME)),
+    };
+    defs[output_section_id::NOTE_GNU_BUILD_ID.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::NOTE_GNU_BUILD_ID_SECTION_NAME)),
+    };
+    // Multi-part generated sections
+    defs[output_section_id::SYMTAB_LOCAL.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::SYMTAB_SECTION_NAME)),
+    };
+    defs[output_section_id::SYMTAB_GLOBAL.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Secondary(output_section_id::SYMTAB_LOCAL),
+    };
+    defs[output_section_id::RELA_DYN_RELATIVE.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::RELA_DYN_SECTION_NAME)),
+    };
+    defs[output_section_id::RELA_DYN_GENERAL.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Secondary(output_section_id::RELA_DYN_RELATIVE),
+    };
+    defs[output_section_id::RISCV_ATTRIBUTES.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::RISCV_ATTRIBUTES_SECTION_NAME)),
+    };
+    defs[output_section_id::RELRO_PADDING.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::RELRO_PADDING_SECTION_NAME)),
+    };
+    // Start of regular sections
+    defs[output_section_id::RODATA.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::RODATA_SECTION_NAME)),
+    };
+    defs[output_section_id::INIT_ARRAY.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::INIT_ARRAY_SECTION_NAME)),
+    };
+    defs[output_section_id::FINI_ARRAY.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::FINI_ARRAY_SECTION_NAME)),
+    };
+    defs[output_section_id::PREINIT_ARRAY.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::PREINIT_ARRAY_SECTION_NAME)),
+    };
+    defs[output_section_id::TEXT.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::TEXT_SECTION_NAME)),
+    };
+    defs[output_section_id::INIT.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::INIT_SECTION_NAME)),
+    };
+    defs[output_section_id::FINI.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::FINI_SECTION_NAME)),
+    };
+    defs[output_section_id::DATA.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::DATA_SECTION_NAME)),
+    };
+    defs[output_section_id::TDATA.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::TDATA_SECTION_NAME)),
+    };
+    defs[output_section_id::TBSS.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::TBSS_SECTION_NAME)),
+    };
+    defs[output_section_id::BSS.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::BSS_SECTION_NAME)),
+    };
+    defs[output_section_id::COMMENT.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::COMMENT_SECTION_NAME)),
+    };
+    defs[output_section_id::GCC_EXCEPT_TABLE.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::GCC_EXCEPT_TABLE_SECTION_NAME)),
+    };
+    defs[output_section_id::NOTE_ABI_TAG.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::NOTE_ABI_TAG_SECTION_NAME)),
+    };
+    defs[output_section_id::DATA_REL_RO.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(secnames::DATA_REL_RO_SECTION_NAME)),
+    };
+
+    defs
+};
 
 #[derive(Default, Debug, Clone, Copy)]
 pub(crate) struct DynamicTagValues<'data> {
@@ -731,7 +884,7 @@ impl platform::Platform for MachO {
     }
 
     fn built_in_section_details() -> &'static [Self::BuiltInSectionDetails] {
-        todo!()
+        &SECTION_DEFINITIONS
     }
 
     fn finalise_group_layout(
@@ -870,8 +1023,16 @@ impl platform::Platform for MachO {
 
     fn built_in_section_infos<'data>()
     -> Vec<crate::output_section_id::SectionOutputInfo<'data, Self>> {
-        // TODO: start here
-        Vec::new()
+        SECTION_DEFINITIONS
+            .iter()
+            .map(|d| SectionOutputInfo {
+                section_attributes: SectionAttributes {},
+                kind: d.kind,
+                min_alignment: alignment::MIN,
+                location: None,
+                secondary_order: None,
+            })
+            .collect()
     }
 
     fn create_layout_properties<'data, 'states, 'files, A: platform::Arch<Platform = Self>>(
