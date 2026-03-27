@@ -106,6 +106,7 @@ fn evaluate_expression<'data, P: Platform>(
         Expression::NotEqual(l, r) => Ok(u64::from(eval!(l)? != eval!(r)?)),
 
         Expression::Sizeof(name) => Ok(section_size(name, section_layouts, output_sections)),
+        Expression::Alignof(name) => Ok(section_align(name, section_layouts, output_sections)),
         Expression::Addr(name) => section_address(name, section_layouts, output_sections),
 
         Expression::Align(expr) => {
@@ -124,6 +125,16 @@ fn evaluate_expression<'data, P: Platform>(
 
         Expression::Min(l, r) => Ok(eval!(l)?.min(eval!(r)?)),
         Expression::Max(l, r) => Ok(eval!(l)?.max(eval!(r)?)),
+        Expression::BitwiseAnd(l, r) => Ok(eval!(l)? & eval!(r)?),
+        Expression::BitwiseOr(l, r) => Ok(eval!(l)? | eval!(r)?),
+        Expression::BitwiseXor(l, r) => Ok(eval!(l)? ^ eval!(r)?),
+        Expression::LeftShift(l, r) => Ok(eval!(l)?.wrapping_shl(eval!(r)? as u32)),
+        Expression::RightShift(l, r) => Ok(eval!(l)?.wrapping_shr(eval!(r)? as u32)),
+        Expression::LogicalAnd(l, r) => Ok(u64::from(eval!(l)? != 0 && eval!(r)? != 0)),
+        Expression::LogicalOr(l, r) => Ok(u64::from(eval!(l)? != 0 || eval!(r)? != 0)),
+        Expression::LogicalNot(e) => Ok(u64::from(eval!(e)? == 0)),
+        Expression::BitwiseNot(e) => Ok(!eval!(e)?),
+        Expression::Negate(e) => Ok(eval!(e)?.wrapping_neg()),
     }
 }
 
@@ -138,6 +149,19 @@ fn section_size<'data, P: Platform>(
         return 0;
     };
     section_layouts.get(id).mem_size
+}
+
+fn section_align<'data, P: Platform>(
+    name: &[u8],
+    section_layouts: &OutputSectionMap<OutputRecordLayout>,
+    output_sections: &OutputSections<'data, P>,
+) -> u64 {
+    // GNU ld returns 0 for ALIGNOF of a section that doesn't exist in the output.
+    // We match that behavior to avoid breaking scripts that guard with SIZEOF.
+    let Some(id) = output_sections.section_id_by_name(SectionName(name)) else {
+        return 0;
+    };
+    section_layouts.get(id).alignment.value()
 }
 
 fn section_address<'data, P: Platform>(
@@ -477,6 +501,15 @@ mod tests {
     fn test_symbol_skips_with_ok() {
         // Symbol references are not yet supported; should return Ok(1) (skip, not fail)
         assert_eq!(eval_const(&Expression::Symbol(b"__bss_start")).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_alignof_evaluation() {
+        // Test that evaluating ALIGNOF for a non-existent section returns 0
+        assert_eq!(
+            eval_const(&Expression::Alignof(b".nonexistent")).unwrap(),
+            0
+        );
     }
 
     fn make_group(assertions: Vec<AssertCommand<'static>>) -> Group<'static, Elf> {
