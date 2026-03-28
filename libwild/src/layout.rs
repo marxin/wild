@@ -1490,28 +1490,29 @@ fn compute_symbols_and_layouts<'data, P: Platform>(
             verbose_timing_phase!("Assign addresses for group");
 
             // TODO
-            if cfg!(debug_assertions) && false {
-                let offset_verifier = crate::verification::OffsetVerifier::new(
-                    &memory_offsets,
-                    &state.common.mem_sizes,
-                );
+            // if cfg!(debug_assertions)  {
+            //     let offset_verifier = crate::verification::OffsetVerifier::new(
+            //         &memory_offsets,
+            //         &state.common.mem_sizes,
+            //     );
 
-                // Make sure that ignored offsets really aren't used by `finalise_layout` by setting
-                // them to an arbitrary value. If they are used, we'll quickly notice.
-                crate::verification::clear_ignored(&mut memory_offsets);
+            //     // Make sure that ignored offsets really aren't used by `finalise_layout` by
+            // setting     // them to an arbitrary value. If they are used, we'll
+            // quickly notice.     crate::verification::clear_ignored(&mut
+            // memory_offsets);
 
-                let layout = state.finalise_layout(&mut memory_offsets, symbols_out, resources)?;
+            //     let layout = state.finalise_layout(&mut memory_offsets, symbols_out, resources)?;
 
-                offset_verifier.verify(
-                    &memory_offsets,
-                    resources.output_sections,
-                    resources.output_order,
-                    &layout.files,
-                )?;
-                Ok(layout)
-            } else {
-                state.finalise_layout(&mut memory_offsets, symbols_out, resources)
-            }
+            //     offset_verifier.verify(
+            //         &memory_offsets,
+            //         resources.output_sections,
+            //         resources.output_order,
+            //         &layout.files,
+            //     )?;
+            //     Ok(layout)
+            // } else {
+            state.finalise_layout(&mut memory_offsets, symbols_out, resources)
+            //}
         })
         .collect()
 }

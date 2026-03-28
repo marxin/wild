@@ -85,16 +85,16 @@ fn write_prelude<'data, A: Arch<Platform = MachO>>(
     let header: &mut FileHeader = from_bytes_mut(buffers.get_mut(part_id::FILE_HEADER))
         .map_err(|_| error!("Invalid file header allocation"))?
         .0;
-    populate_file_header::<A>(layout, &prelude.header_info, header)?;
+    populate_file_header::<A>(layout, &prelude.header_info, header);
 
     Ok(())
 }
 
 fn populate_file_header<A: Arch<Platform = MachO>>(
-    layout: &MachOLayout,
-    header_info: &HeaderInfo,
+    _layout: &MachOLayout,
+    _header_info: &HeaderInfo,
     header: &mut FileHeader,
-) -> Result {
+) {
     header.magic = U32::new(BigEndian, MH_CIGAM_64);
     header.cputype = U32::new(LE, CPU_TYPE_ARM64);
     header.cpusubtype = U32::new(LE, 0);
@@ -104,7 +104,4 @@ fn populate_file_header<A: Arch<Platform = MachO>>(
     header.sizeofcmds = U32::new(LE, 0);
     header.flags = U32::new(LE, 0);
     header.reserved = U32::new(LE, 0);
-    dbg!(&header);
-
-    Ok(())
 }
