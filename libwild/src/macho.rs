@@ -47,7 +47,9 @@ type SectionTable<'data> = &'data [Section64<crate::macho::Endianness>];
 type SymbolTable<'data> = object::read::macho::SymbolTable<'data, macho::MachHeader64<Endianness>>;
 type SymtabEntry = object::macho::Nlist64<Endianness>;
 type Relocation = object::macho::Relocation<Endianness>;
+
 pub(crate) type FileHeader = object::macho::MachHeader64<Endianness>;
+pub(crate) type SegmentCommand = object::macho::SegmentCommand64<Endianness>;
 
 #[derive(derive_more::Debug)]
 pub(crate) struct File<'data> {
@@ -1154,7 +1156,12 @@ impl platform::Platform for MachO {
         header_info: &crate::layout::HeaderInfo,
         output_sections: &crate::output_section_id::OutputSections<Self>,
     ) {
-        sizes.increment(part_id::FILE_HEADER, dbg!(size_of::<FileHeader>() as u64));
+        sizes.increment(part_id::FILE_HEADER, size_of::<FileHeader>() as u64);
+        sizes.increment(
+            part_id::PAGEZERO_SEGMENT,
+            size_of::<SegmentCommand>() as u64,
+        );
+
         // TODO
     }
 
@@ -1254,6 +1261,7 @@ impl platform::Platform for MachO {
 
         // TODO
         builder.add_section(output_section_id::FILE_HEADER);
+        builder.add_section(output_section_id::PAGEZERO_SEGMENT);
         builder.add_section(output_section_id::TEXT);
 
         builder.build()

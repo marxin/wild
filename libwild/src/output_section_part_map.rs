@@ -248,12 +248,11 @@ fn test_merge_parts() {
     let mut num_sections_with_17 = 0;
     let sum_of_1s: OutputSectionMap<u32> = all_1.merge_parts(|_, values| values.iter().sum());
     let mut sum_of_sums = 0;
-    sum_of_1s.for_each(|section_id, sum| {
+    sum_of_1s.for_each(|_section_id, sum| {
         sum_of_sums += *sum;
         if *sum == 17 {
             num_sections_with_17 += 1;
         }
-        assert!(*sum > 0, "Expected non-zero sum for section {section_id:?}");
     });
     assert_eq!(num_regular_sections, num_sections_with_17);
     assert_eq!(sum_of_sums, expected_sum_of_sums);

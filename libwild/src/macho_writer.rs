@@ -11,12 +11,14 @@ use crate::layout::Layout;
 use crate::layout::PreludeLayout;
 use crate::macho::FileHeader;
 use crate::macho::MachO;
+use crate::macho::SegmentCommand;
 use crate::output_section_part_map::OutputSectionPartMap;
 use crate::output_trace::TraceOutput;
 use crate::part_id;
 use crate::platform::Arch;
 use crate::timing_phase;
 use crate::verbose_timing_phase;
+use libc::LC_SEGMENT_64;
 use object::BigEndian;
 use object::Endianness;
 use object::U32;
@@ -24,6 +26,7 @@ use object::from_bytes_mut;
 use object::macho::CPU_TYPE_ARM64;
 use object::macho::MH_CIGAM_64;
 use object::macho::MH_EXECUTE;
+use object::macho::SEG_PAGEZERO;
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
 
@@ -87,6 +90,12 @@ fn write_prelude<'data, A: Arch<Platform = MachO>>(
         .0;
     populate_file_header::<A>(layout, &prelude.header_info, header);
 
+    let pagezero_command: &mut SegmentCommand =
+        from_bytes_mut(buffers.get_mut(part_id::PAGEZERO_SEGMENT))
+            .map_err(|_| error!("Invalid PAGEZERO segment allocation"))?
+            .0;
+    write_pagezero_command::<A>(pagezero_command);
+
     Ok(())
 }
 
@@ -100,8 +109,24 @@ fn populate_file_header<A: Arch<Platform = MachO>>(
     header.cpusubtype = U32::new(LE, 0);
     // TODO
     header.filetype = U32::new(LE, MH_EXECUTE);
-    header.ncmds = U32::new(LE, 0);
-    header.sizeofcmds = U32::new(LE, 0);
+    // TODO
+    header.ncmds = U32::new(LE, 1);
+    header.sizeofcmds = U32::new(LE, 72);
     header.flags = U32::new(LE, 0);
     header.reserved = U32::new(LE, 0);
+}
+
+fn write_pagezero_command<A: Arch<Platform = MachO>>(command: &mut SegmentCommand) {
+    command.cmd.set(LE, LC_SEGMENT_64);
+    command.cmdsize.set(LE, size_of::<SegmentCommand>() as u32);
+    command.segname[..SEG_PAGEZERO.len()].copy_from_slice(SEG_PAGEZERO.as_bytes());
+    command.vmaddr.set(LE, 0);
+    // The entire 32-bit address space maps to the zero page.
+    command.vmsize.set(LE, 1 << 32);
+    command.fileoff.set(LE, 0);
+    command.filesize.set(LE, 0);
+    command.maxprot.set(LE, 0);
+    command.initprot.set(LE, 0);
+    command.nsects.set(LE, 0);
+    command.flags.set(LE, 0);
 }
