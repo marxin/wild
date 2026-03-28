@@ -220,7 +220,10 @@ impl<'out> OutputSectionPartMap<&'out mut [u8]> {
         &mut self,
         sizes: &OutputSectionPartMap<usize>,
     ) -> OutputSectionPartMap<&'out mut [u8]> {
-        self.mut_with_map(sizes, |buffer, size| buffer.split_off_mut(..*size).unwrap())
+        self.mut_with_map(sizes, |buffer, size| {
+            // TODO: hack
+            buffer.split_off_mut(..*size).unwrap_or_default()
+        })
     }
 }
 

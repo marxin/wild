@@ -1462,7 +1462,7 @@ impl platform::Platform for Elf {
         common: &mut CommonGroupState<'data, Elf>,
         symbol_db: &SymbolDb<'data, Elf>,
         per_symbol_flags: &AtomicPerSymbolFlags,
-    ) {
+    ) -> Result {
         let mut num_locals = 0;
         let mut num_globals = 0;
         let mut strings_size = 0;
@@ -1506,6 +1506,7 @@ impl platform::Platform for Elf {
         common.allocate(part_id::SYMTAB_LOCAL, num_locals * entry_size);
         common.allocate(part_id::SYMTAB_GLOBAL, num_globals * entry_size);
         common.allocate(part_id::STRTAB, strings_size as u64);
+        Ok(())
     }
 
     fn allocate_internal_symbol(

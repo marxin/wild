@@ -7,13 +7,18 @@ use crate::alignment;
 use crate::args::macho::MachOArgs;
 use crate::ensure;
 use crate::error;
+use crate::error::Result;
 use crate::layout_rules::SectionKind;
 use crate::layout_rules::SectionRule;
+use crate::macho_writer;
 use crate::output_section_id;
 use crate::output_section_id::NUM_BUILT_IN_SECTIONS;
+use crate::output_section_id::OutputOrderBuilder;
 use crate::output_section_id::SectionName;
 use crate::output_section_id::SectionOutputInfo;
+use crate::part_id;
 use crate::platform;
+use crate::platform::ObjectFile;
 use crate::symbol_db::Visibility;
 use linker_utils::elf::secnames;
 use object::Endian;
@@ -42,6 +47,7 @@ type SectionTable<'data> = &'data [Section64<crate::macho::Endianness>];
 type SymbolTable<'data> = object::read::macho::SymbolTable<'data, macho::MachHeader64<Endianness>>;
 type SymtabEntry = object::macho::Nlist64<Endianness>;
 type Relocation = object::macho::Relocation<Endianness>;
+pub(crate) type FileHeader = object::macho::MachHeader64<Endianness>;
 
 #[derive(derive_more::Debug)]
 pub(crate) struct File<'data> {
@@ -410,7 +416,7 @@ pub(crate) struct SectionFlags {}
 
 impl platform::SectionFlags for SectionFlags {
     fn is_alloc(self) -> bool {
-        todo!()
+        true
     }
 }
 
@@ -508,51 +514,48 @@ impl platform::SectionAttributes for SectionAttributes {
         output_sections: &mut crate::output_section_id::OutputSections<Self::Platform>,
         section_id: crate::output_section_id::OutputSectionId,
     ) {
-        todo!()
     }
 
     fn is_null(&self) -> bool {
-        todo!()
+        false
     }
 
     fn is_alloc(&self) -> bool {
-        todo!()
+        false
     }
 
     fn is_executable(&self) -> bool {
-        todo!()
+        false
     }
 
     fn is_tls(&self) -> bool {
-        todo!()
+        false
     }
 
     fn is_writable(&self) -> bool {
-        todo!()
+        false
     }
 
     fn is_no_bits(&self) -> bool {
-        todo!()
+        false
     }
 
     fn flags(&self) -> <Self::Platform as platform::Platform>::SectionFlags {
-        todo!()
+        SectionFlags {}
     }
 
     fn ty(&self) -> <Self::Platform as platform::Platform>::SectionType {
-        todo!()
+        SectionType {}
     }
 
-    fn set_to_default_type(&mut self) {
-        todo!()
-    }
+    fn set_to_default_type(&mut self) {}
 }
 
 pub(crate) struct NonAddressableIndexes {}
 
 impl platform::NonAddressableIndexes for NonAddressableIndexes {
     fn new<P: platform::Platform>(symbol_db: &crate::symbol_db::SymbolDb<P>) -> Self {
-        todo!()
+        NonAddressableIndexes {}
     }
 }
 
@@ -574,31 +577,31 @@ impl platform::ProgramSegmentDef for ProgramSegmentDef {
     type Platform = MachO;
 
     fn is_writable(self) -> bool {
-        todo!()
+        false
     }
 
     fn is_executable(self) -> bool {
-        todo!()
+        false
     }
 
     fn always_keep(self) -> bool {
-        todo!()
+        true
     }
 
     fn is_loadable(self) -> bool {
-        todo!()
+        false
     }
 
     fn is_stack(self) -> bool {
-        todo!()
+        false
     }
 
     fn is_tls(self) -> bool {
-        todo!()
+        false
     }
 
     fn order_key(self) -> usize {
-        todo!()
+        0
     }
 
     fn should_include_section(
@@ -606,7 +609,7 @@ impl platform::ProgramSegmentDef for ProgramSegmentDef {
         section_info: &crate::output_section_id::SectionOutputInfo<Self::Platform>,
         section_id: crate::output_section_id::OutputSectionId,
     ) -> bool {
-        todo!()
+        true
     }
 }
 
@@ -869,7 +872,7 @@ impl platform::Platform for MachO {
         output: &crate::file_writer::Output,
         layout: &crate::layout::Layout<'data, Self>,
     ) -> crate::error::Result {
-        todo!()
+        output.write(layout, macho_writer::write::<A>)
     }
 
     fn section_attributes(header: &Self::SectionHeader) -> Self::SectionAttributes {
@@ -881,7 +884,6 @@ impl platform::Platform for MachO {
         keep_sections: &mut crate::output_section_map::OutputSectionMap<bool>,
         args: &Self::Args,
     ) {
-        todo!()
     }
 
     fn is_zero_sized_section_content(
@@ -897,7 +899,6 @@ impl platform::Platform for MachO {
     fn finalise_group_layout(
         memory_offsets: &crate::output_section_part_map::OutputSectionPartMap<u64>,
     ) -> Self::GroupLayoutExt {
-        todo!()
     }
 
     fn frame_data_base_address(
@@ -933,14 +934,12 @@ impl platform::Platform for MachO {
         object: &mut crate::layout::ObjectLayoutState<'data, Self>,
         common: &mut crate::layout::CommonGroupState<'data, Self>,
     ) {
-        todo!()
     }
 
     fn finalise_object_layout<'data>(
         object: &crate::layout::ObjectLayoutState<'data, Self>,
         memory_offsets: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
     ) {
-        todo!()
     }
 
     fn finalise_layout_dynamic<'data>(
@@ -1011,15 +1010,15 @@ impl platform::Platform for MachO {
         keep_segments: &mut [bool],
         args: &Self::Args,
     ) {
-        todo!()
     }
 
     fn program_segment_defs() -> &'static [Self::ProgramSegmentDef] {
-        todo!()
+        // TODO
+        &[ProgramSegmentDef {}]
     }
 
     fn unconditional_segment_defs() -> &'static [Self::ProgramSegmentDef] {
-        todo!()
+        &[]
     }
 
     fn create_linker_defined_symbols(
@@ -1088,7 +1087,6 @@ impl platform::Platform for MachO {
         counts: &mut Self::NonAddressableCounts,
         state: &mut Self::EpilogueLayoutExt,
     ) {
-        todo!()
     }
 
     fn apply_non_addressable_indexes<'data, 'groups>(
@@ -1098,7 +1096,6 @@ impl platform::Platform for MachO {
             Item = &'groups mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         >,
     ) {
-        todo!()
     }
 
     fn finalise_sizes_epilogue<'data>(
@@ -1108,14 +1105,12 @@ impl platform::Platform for MachO {
         properties: &Self::LayoutExt,
         symbol_db: &crate::symbol_db::SymbolDb<'data, Self>,
     ) {
-        todo!()
     }
 
     fn finalise_sizes_all<'data>(
         mem_sizes: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         symbol_db: &crate::symbol_db::SymbolDb<'data, Self>,
     ) {
-        todo!()
     }
 
     fn apply_late_size_adjustments_epilogue(
@@ -1125,7 +1120,7 @@ impl platform::Platform for MachO {
         dynamic_symbol_defs: &[crate::layout::DynamicSymbolDefinition<Self>],
         args: &Self::Args,
     ) -> crate::error::Result {
-        todo!()
+        Ok(())
     }
 
     fn finalise_layout_epilogue<'data>(
@@ -1136,7 +1131,7 @@ impl platform::Platform for MachO {
         dynsym_start_index: u32,
         dynamic_symbol_defs: &[crate::layout::DynamicSymbolDefinition<Self>],
     ) -> crate::error::Result {
-        todo!()
+        Ok(())
     }
 
     fn is_symbol_non_interposable<'data>(
@@ -1159,7 +1154,8 @@ impl platform::Platform for MachO {
         header_info: &crate::layout::HeaderInfo,
         output_sections: &crate::output_section_id::OutputSections<Self>,
     ) {
-        todo!()
+        sizes.increment(part_id::FILE_HEADER, dbg!(size_of::<FileHeader>() as u64));
+        // TODO
     }
 
     fn finalise_sizes_for_symbol<'data>(
@@ -1168,7 +1164,7 @@ impl platform::Platform for MachO {
         symbol_id: crate::symbol_db::SymbolId,
         flags: crate::value_flags::ValueFlags,
     ) -> crate::error::Result {
-        todo!()
+        Ok(())
     }
 
     fn allocate_resolution(
@@ -1176,7 +1172,6 @@ impl platform::Platform for MachO {
         mem_sizes: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         output_kind: crate::output_kind::OutputKind,
     ) {
-        todo!()
     }
 
     fn allocate_object_symtab_space<'data>(
@@ -1184,8 +1179,19 @@ impl platform::Platform for MachO {
         common: &mut crate::layout::CommonGroupState<'data, Self>,
         symbol_db: &crate::symbol_db::SymbolDb<'data, Self>,
         per_symbol_flags: &crate::value_flags::AtomicPerSymbolFlags,
-    ) {
-        todo!()
+    ) -> Result {
+        let mut num_globals = 0;
+        let mut strings_size = 0;
+        for symbol in state.object.symbols_iter() {
+            // TODO: very basic
+            num_globals += 1;
+            strings_size += state.object.symbol_name(symbol)?.len() + 1;
+        }
+        let entry_size = size_of::<SymtabEntry>() as u64;
+        common.allocate(part_id::SYMTAB_GLOBAL, dbg!(num_globals * entry_size));
+        common.allocate(part_id::STRTAB, dbg!(strings_size as u64));
+
+        Ok(())
     }
 
     fn allocate_internal_symbol(
@@ -1209,7 +1215,7 @@ impl platform::Platform for MachO {
         memory_offsets: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         resources: &crate::layout::FinaliseLayoutResources<'_, 'data, Self>,
     ) -> crate::error::Result<Self::PreludeLayoutExt> {
-        todo!()
+        Ok(())
     }
 
     fn create_resolution(
@@ -1244,7 +1250,13 @@ impl platform::Platform for MachO {
         crate::output_section_id::OutputOrder,
         crate::program_segments::ProgramSegments<Self::ProgramSegmentDef>,
     ) {
-        todo!()
+        let mut builder = OutputOrderBuilder::<Self>::new(output_kind, output_sections, secondary);
+
+        // TODO
+        builder.add_section(output_section_id::FILE_HEADER);
+        builder.add_section(output_section_id::TEXT);
+
+        builder.build()
     }
 }
 

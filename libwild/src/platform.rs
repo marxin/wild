@@ -546,7 +546,7 @@ pub(crate) trait Platform: Copy + Send + Sync + Sized + std::fmt::Debug + 'stati
         common: &mut CommonGroupState<'data, Self>,
         symbol_db: &SymbolDb<'data, Self>,
         per_symbol_flags: &AtomicPerSymbolFlags,
-    );
+    ) -> Result;
 
     fn allocate_internal_symbol(
         symbol_id: SymbolId,
