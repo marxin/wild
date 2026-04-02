@@ -1660,6 +1660,8 @@ fn compute_segment_layout<P: Platform>(
 
     segments.sort_by_key(|s| program_segments.order_key(s.id, s.sizes.mem_offset));
 
+    dbg!(&segments);
+
     Ok(SegmentLayouts {
         segments,
         tls_layout,
