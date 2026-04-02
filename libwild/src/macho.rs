@@ -34,6 +34,7 @@ use object::read::macho::MachHeader;
 use object::read::macho::Nlist;
 use object::read::macho::Section;
 use object::read::macho::Segment;
+use std::borrow::Cow;
 use std::default;
 use winnow::combinator::todo;
 
@@ -286,8 +287,13 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         todo!()
     }
 
-    fn section_display_name(&self, index: object::SectionIndex) -> std::borrow::Cow<'data, str> {
-        todo!()
+    fn section_display_name(&self, index: object::SectionIndex) -> Cow<'data, str> {
+        self.section(index)
+            .and_then(|section| self.section_name(section))
+            .map_or_else(
+                |_| format!("<index {}>", index.0).into(),
+                String::from_utf8_lossy,
+            )
     }
 
     fn dynamic_tag_values(
@@ -578,7 +584,7 @@ pub(crate) struct ProgramSegmentDef {
 
 impl std::fmt::Display for ProgramSegmentDef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        write!(f, "{:?}", self.segment_type)
     }
 }
 
