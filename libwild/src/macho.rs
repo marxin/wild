@@ -12,8 +12,10 @@ use crate::layout_rules::SectionKind;
 use crate::layout_rules::SectionRule;
 use crate::macho_writer;
 use crate::output_section_id;
+use crate::output_section_id::FILE_HEADER;
 use crate::output_section_id::NUM_BUILT_IN_SECTIONS;
 use crate::output_section_id::OutputOrderBuilder;
+use crate::output_section_id::PAGEZERO_SEGMENT;
 use crate::output_section_id::SectionName;
 use crate::output_section_id::SectionOutputInfo;
 use crate::part_id;
@@ -567,7 +569,7 @@ impl platform::NonAddressableIndexes for NonAddressableIndexes {
     }
 }
 
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub(crate) enum SegmentType {
     Header,
     LoadCommand,
@@ -577,7 +579,7 @@ pub(crate) enum SegmentType {
 
 impl platform::SegmentType for SegmentType {}
 
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub(crate) struct ProgramSegmentDef {
     segment_type: SegmentType,
 }
@@ -624,7 +626,12 @@ impl platform::ProgramSegmentDef for ProgramSegmentDef {
         section_info: &crate::output_section_id::SectionOutputInfo<Self::Platform>,
         section_id: crate::output_section_id::OutputSectionId,
     ) -> bool {
-        true
+        self.segment_type
+            == match section_id {
+                FILE_HEADER => SegmentType::Header,
+                PAGEZERO_SEGMENT => SegmentType::LoadCommand,
+                _ => SegmentType::Data,
+            }
     }
 }
 
@@ -645,11 +652,11 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
         [DEFAULT_DEFS; NUM_BUILT_IN_SECTIONS];
 
     defs[output_section_id::FILE_HEADER.as_usize()] = BuiltInSectionDetails {
-        kind: SectionKind::Primary(SectionName(b"")),
+        kind: SectionKind::Primary(SectionName(b"FILE_HEADER")),
         target_segment_type: Some(SegmentType::Header),
     };
     defs[output_section_id::PAGEZERO_SEGMENT.as_usize()] = BuiltInSectionDetails {
-        kind: SectionKind::Primary(SectionName(b"")),
+        kind: SectionKind::Primary(SectionName(b"PAGEZERO_SEGMENT")),
         target_segment_type: Some(SegmentType::LoadCommand),
     };
     defs[output_section_id::STRTAB.as_usize()] = BuiltInSectionDetails {
