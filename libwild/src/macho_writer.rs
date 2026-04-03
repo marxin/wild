@@ -1,4 +1,3 @@
-use crate::elf::ProgramSegmentDef;
 use crate::error;
 use crate::error::Context;
 use crate::error::Result;
@@ -21,12 +20,12 @@ use crate::part_id;
 use crate::platform::Arch;
 use crate::timing_phase;
 use crate::verbose_timing_phase;
-use libc::LC_SEGMENT_64;
 use object::BigEndian;
 use object::Endianness;
 use object::U32;
 use object::from_bytes_mut;
 use object::macho::CPU_TYPE_ARM64;
+use object::macho::LC_SEGMENT_64;
 use object::macho::MH_CIGAM_64;
 use object::macho::MH_EXECUTE;
 use object::macho::SEG_PAGEZERO;
@@ -34,7 +33,6 @@ use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
 
 const LE: Endianness = Endianness::Little;
-const BE: Endianness = Endianness::Big;
 
 type MachOLayout<'data> = Layout<'data, MachO>;
 
