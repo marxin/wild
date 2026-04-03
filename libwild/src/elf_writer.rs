@@ -2540,20 +2540,11 @@ fn apply_relocation<
         RelocationKind::None => return Ok(RelocationModifier::Normal),
         RelocationKind::Alignment => {
             let addend = addend as u64;
-            let address = section_address + rel.offset();
-            ensure!(
-                addend.is_power_of_two(),
-                "A power of 2 expected for Alignment relocation: {}",
-                addend
-            );
-            // Must be aligned to N-bytes, where N is the smallest power of two
-            // that is greater than the value of the addend field.
-            let expected_alignment = addend.next_power_of_two();
-            ensure!(
-                addend.is_multiple_of(expected_alignment),
-                "Unsatisfied alignment ({expected_alignment} bytes) at address: {}",
-                HexU64::new(address)
-            );
+            let removed_bytes =
+                relax_deltas.map_or(0u64, |d| u64::from(d.delta_bytes_at(rel.offset())));
+            let padding_bytes = addend.saturating_sub(removed_bytes) as usize;
+            A::fill_nop_padding(out, offset_in_section as usize, padding_bytes);
+
             return Ok(RelocationModifier::Normal);
         }
         _ => {}
@@ -2990,7 +2981,24 @@ fn apply_debug_relocation<'data, A: Arch<Platform = Elf>, R: Relocation>(
         .merged_symbol_resolution(object_layout.symbol_id_range.input_to_id(symbol_index))
         .or_else(|| {
             section_index.and_then(|section_index| {
-                object_layout.section_resolutions[section_index.0].full_resolution()
+                let section_address =
+                    object_layout.section_resolutions[section_index.0].address()?;
+                // Include the symbol's offset within the section (adjusted for any relaxation
+                // deltas). This is necessary on architectures like RISC-V and LoongArch64 where
+                // debug info references local symbols (e.g. .LFB0, .LFE0) whose value is their
+                // offset within the section, rather than section symbols where the offset is
+                // encoded in the relocation addend.
+                let output_offset = opt_input_to_output(
+                    object_layout.section_relax_deltas.get(section_index.0),
+                    crate::platform::Symbol::value(sym),
+                );
+
+                Some(Resolution {
+                    raw_value: section_address + output_offset,
+                    dynamic_symbol_index: None,
+                    flags: ValueFlags::empty(),
+                    format_specific: Default::default(),
+                })
             })
         });
 

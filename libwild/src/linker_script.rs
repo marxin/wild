@@ -22,6 +22,7 @@ use winnow::combinator::preceded;
 use winnow::combinator::repeat_till;
 use winnow::error::ContextError;
 use winnow::error::FromExternalError;
+use winnow::token::one_of;
 use winnow::token::take_until;
 use winnow::token::take_while;
 
@@ -73,6 +74,7 @@ pub(crate) enum Command<'a> {
     },
     Provide(ProvideSymbolDefinition<'a>),
     Assert(AssertCommand<'a>),
+    Memory(Vec<MemoryRegion<'a>>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -98,6 +100,13 @@ pub(crate) struct Section<'a> {
     pub(crate) output_section_name: &'a [u8],
     pub(crate) commands: Vec<ContentsCommand<'a>>,
     pub(crate) alignment: Option<Alignment>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct MemoryRegion<'a> {
+    pub(crate) name: &'a [u8],
+    pub(crate) origin: Expression<'a>,
+    pub(crate) length: Expression<'a>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -145,13 +154,13 @@ impl<'a> Eq for AssertCommand<'a> {}
 /// - Bitwise: &, |, ^, ~, <<, >>
 /// - Logical: &&, ||
 /// - Unary: -, !, ~
-/// - Functions: SIZEOF, ALIGNOF, ADDR, ALIGN, MIN, MAX
+/// - Functions: SIZEOF, ALIGNOF, ADDR, LOADADDR, ALIGN, MIN, MAX
 /// - Numbers (hex/decimal), symbols, location counter (.)
 /// - Parentheses for grouping
 ///
 /// Not yet supported (can be added when needed):
 /// - Ternary operator (? :)
-/// - Additional functions (LOADADDR, LENGTH, ORIGIN)
+/// - Additional functions (LENGTH, ORIGIN)
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum Expression<'a> {
     /// A numeric literal (e.g., 0x1000, 42)
@@ -175,7 +184,10 @@ pub(crate) enum Expression<'a> {
     /// Function calls
     Sizeof(&'a [u8]),
     Alignof(&'a [u8]),
+    Origin(&'a [u8]),
+    Length(&'a [u8]),
     Addr(&'a [u8]),
+    Loadaddr(&'a [u8]),
     Align(Box<Expression<'a>>),
     /// MIN and MAX functions (take two expressions)
     Min(Box<Expression<'a>>, Box<Expression<'a>>),
@@ -292,6 +304,7 @@ fn parse_command<'input>(input: &mut &'input BStr) -> winnow::Result<Command<'in
         b"PROVIDE" => Command::Provide(parse_provide(input, false)?),
         b"PROVIDE_HIDDEN" => Command::Provide(parse_provide(input, true)?),
         b"ASSERT" => Command::Assert(parse_assert(input)?),
+        b"MEMORY" => Command::Memory(parse_memory(input)?),
         other => {
             if input.starts_with(b"=") {
                 // Symbol definition
@@ -363,6 +376,49 @@ fn parse_assert<'input>(input: &mut &'input BStr) -> winnow::Result<AssertComman
         message,
         remainder,
     })
+}
+
+fn parse_memory_region<'input>(input: &mut &'input BStr) -> winnow::Result<MemoryRegion<'input>> {
+    let name = parse_token(input)?;
+    skip_comments_and_whitespace(input)?;
+
+    // Parse the colon separator
+    ':'.parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+
+    // Parse the Origin block
+    alt(("ORIGIN", "org", "o")).parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+    '='.parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+    let origin = parse_expression.parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+
+    // Parse the comma separator
+    ','.parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+
+    // Parse the Length block
+    alt(("LENGTH", "len", "l")).parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+    '='.parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+    let length = parse_expression.parse_next(input)?;
+
+    Ok(MemoryRegion {
+        name,
+        origin,
+        length,
+    })
+}
+
+fn parse_memory<'input>(input: &mut &'input BStr) -> winnow::Result<Vec<MemoryRegion<'input>>> {
+    '{'.parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+    let (regions, _) = repeat_till(0.., parse_memory_region, '}').parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+
+    Ok(regions)
 }
 
 /// Parse an expression - entry point for expression parsing
@@ -582,6 +638,27 @@ fn parse_unary<'a>(input: &mut &'a BStr) -> winnow::Result<Expression<'a>> {
     parse_primary.parse_next(input)
 }
 
+/// Parse hex and decimal numbers, applying an optional K (x1024) or M (x1024^2) suffix.
+fn parse_number_with_suffix<'a>(input: &mut &'a BStr) -> winnow::Result<Expression<'a>> {
+    let base_number = alt((
+        // Hex numbers (0x or 0X prefix)
+        preceded(alt(("0x", "0X")), hex_uint::<_, u64, _>),
+        // Decimal numbers
+        dec_uint::<_, u64, _>,
+    ))
+    .parse_next(input)?;
+
+    let suffix = opt(one_of(b"KkMm")).parse_next(input)?;
+
+    let final_value = match suffix {
+        Some(b'K') | Some(b'k') => base_number.wrapping_mul(1024),
+        Some(b'M') | Some(b'm') => base_number.wrapping_mul(1024 * 1024),
+        _ => base_number,
+    };
+
+    Ok(Expression::Number(final_value))
+}
+
 /// Parse primary expressions: numbers, symbols, functions, parentheses
 fn parse_primary<'a>(input: &mut &'a BStr) -> winnow::Result<Expression<'a>> {
     multispace0.parse_next(input)?;
@@ -589,10 +666,8 @@ fn parse_primary<'a>(input: &mut &'a BStr) -> winnow::Result<Expression<'a>> {
     alt((
         // Parentheses - parse expression inside
         delimited('(', parse_expression, ')'),
-        // Hex numbers (0x or 0X prefix)
-        preceded(alt(("0x", "0X")), hex_uint::<_, u64, _>).map(Expression::Number),
-        // Decimal numbers
-        dec_uint::<_, u64, _>.map(Expression::Number),
+        // Numbers (hex/decimal) with optional size suffixes
+        parse_number_with_suffix,
         // Functions and symbols (identifiers) - this handles '.' as well
         parse_identifier_or_function,
     ))
@@ -634,6 +709,18 @@ fn parse_identifier_or_function<'a>(input: &mut &'a BStr) -> winnow::Result<Expr
             b"ADDR" => {
                 let arg = parse_function_arg.parse_next(input)?;
                 Ok(Expression::Addr(arg))
+            }
+            b"ORIGIN" => {
+                let arg = parse_function_arg.parse_next(input)?;
+                Ok(Expression::Origin(arg))
+            }
+            b"LENGTH" => {
+                let arg = parse_function_arg.parse_next(input)?;
+                Ok(Expression::Length(arg))
+            }
+            b"LOADADDR" => {
+                let arg = parse_function_arg.parse_next(input)?;
+                Ok(Expression::Loadaddr(arg))
             }
             b"ALIGN" => {
                 let arg_expr = parse_expression.parse_next(input)?;
@@ -1672,6 +1759,84 @@ mod tests {
                 );
             }
             _ => panic!("Expected Assert command"),
+        }
+    }
+
+    #[test]
+    fn test_loadaddr_parsing() {
+        let script = parse_script(r#"ASSERT(LOADADDR(.text) == 8, "loadaddr test");"#).unwrap();
+        match &script.commands[0] {
+            Command::Assert(assert_cmd) => {
+                assert_eq!(
+                    assert_cmd.expression,
+                    Expression::Equal(
+                        Box::new(Expression::Loadaddr(".text".as_bytes())),
+                        Box::new(Expression::Number(8)),
+                    )
+                );
+            }
+            _ => panic!("Expected Assert command"),
+        }
+    }
+
+    #[test]
+    fn test_number_suffixes() {
+        let cases = [("1K", 1024), ("2k", 2048), ("1M", 1048576), ("2m", 2097152)];
+
+        for (input, expected) in cases {
+            let mut bstr = winnow::BStr::new(input.as_bytes());
+            let expr = parse_expression.parse_next(&mut bstr).unwrap();
+            assert_eq!(expr, Expression::Number(expected));
+        }
+    }
+
+    #[test]
+    fn test_memory_block_parsing() {
+        let script = parse_script(
+            r#"MEMORY {
+                rom : ORIGIN = 256K, LENGTH = 1M
+                ram : org = 0x20000000, l = 32K
+            }"#,
+        )
+        .unwrap();
+        let Command::Memory(regions) = &script.commands[0] else {
+            panic!("Expected Memory command")
+        };
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].name, b"rom");
+        assert_eq!(regions[0].origin, Expression::Number(262144));
+        assert_eq!(regions[0].length, Expression::Number(1048576));
+        assert_eq!(regions[1].name, b"ram");
+        assert_eq!(regions[1].origin, Expression::Number(0x20000000));
+        assert_eq!(regions[1].length, Expression::Number(32768));
+    }
+
+    #[test]
+    fn test_memory_functions_parsing() {
+        let cases = [
+            (
+                r#"ASSERT(ORIGIN(rom) == 256K, "");"#,
+                Expression::Origin(b"rom"),
+                262144u64,
+            ),
+            (
+                r#"ASSERT(LENGTH(ram) == 32K, "");"#,
+                Expression::Length(b"ram"),
+                32768,
+            ),
+        ];
+        for (input, expected_fn, expected_val) in cases {
+            let script = parse_script(input).unwrap();
+            let Command::Assert(cmd) = &script.commands[0] else {
+                panic!()
+            };
+            assert_eq!(
+                cmd.expression,
+                Expression::Equal(
+                    Box::new(expected_fn),
+                    Box::new(Expression::Number(expected_val))
+                )
+            );
         }
     }
 }

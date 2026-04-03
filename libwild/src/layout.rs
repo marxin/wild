@@ -1816,7 +1816,7 @@ impl<'data, P: Platform> GroupActivationInputs<'data, P> {
         let files = resolved
             .files
             .into_iter()
-            .map(|file| file.create_layout_state())
+            .map(|file| file.create_layout_state(resources.symbol_db.args))
             .collect();
         let mut group = GroupState {
             queue: LocalWorkQueue::new(group_index),
@@ -2599,7 +2599,7 @@ pub(crate) fn resolution_flags(rel_kind: RelocationKind) -> ValueFlags {
 }
 
 impl<'data, P: Platform> PreludeLayoutState<'data, P> {
-    fn new(input_state: resolution::ResolvedPrelude<'data>) -> Self {
+    fn new(input_state: resolution::ResolvedPrelude<'data>, args: &P::Args) -> Self {
         Self {
             file_id: PRELUDE_FILE_ID,
             symbol_id_range: SymbolIdRange::prelude(input_state.symbol_definitions.len()),
@@ -2608,7 +2608,7 @@ impl<'data, P: Platform> PreludeLayoutState<'data, P> {
                 start_symbol_id: SymbolId::zero(),
             },
             entry_symbol_id: None,
-            identity: format!("Linker: {}", crate::identity::linker_identity()),
+            identity: format!("Linker: {}\0", args.common().linker_identity()),
             header_info: None,
             dynamic_linker: None,
             format_specific: Default::default(),
@@ -3584,14 +3584,7 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
             SectionSlot::UnloadedDebugInfo(part_id) => {
                 // On RISC-V, the debug info sections contain relocations to local symbols (e.g.
                 // labels).
-                self.load_debug_section::<A>(
-                    common,
-                    queue,
-                    *part_id,
-                    section_index,
-                    resources,
-                    scope,
-                )?;
+                self.load_debug_section::<A>(common, *part_id, section_index, resources)?;
             }
             SectionSlot::Discard => {
                 bail!(
@@ -3653,20 +3646,20 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
     fn load_debug_section<'scope, A: Arch<Platform = P>>(
         &mut self,
         common: &mut CommonGroupState<'data, P>,
-        queue: &mut LocalWorkQueue,
-
         part_id: PartId,
         section_index: SectionIndex,
         resources: &'scope GraphResources<'data, '_, P>,
-        scope: &Scope<'scope>,
     ) -> Result {
         let header = self.object.section(section_index)?;
         let section = Section::create(header, self, section_index, part_id)?;
-        if A::local_symbols_in_debug_info() {
-            <A::Platform as Platform>::load_object_debug_relocations::<A>(
-                self, common, queue, resources, section, scope,
-            )?;
-        }
+
+        // Note: We intentionally do NOT process debug relocations here. On some architectures (like
+        // RISC-V and LoongArch64), debug sections reference local symbols (e.g. .LFB0, .LFE0) in
+        // code sections. Processing those relocations during GC would send symbol requests that
+        // load those code sections, defeating garbage collection. Instead, debug relocations are
+        // resolved at write time in `apply_debug_relocation`, which uses tombstone values for
+        // symbols in GC'd sections and computes addresses from section resolutions for symbols in
+        // live sections.
 
         tracing::debug!(loaded_debug_section = %self.object.section_display_name(section_index),);
         common.section_loaded(part_id, header, section, resources.output_sections);
@@ -4066,12 +4059,12 @@ impl<P: Platform> ResolutionWriter<'_, '_, P> {
 }
 
 impl<'data, P: Platform> resolution::ResolvedFile<'data, P> {
-    fn create_layout_state(self) -> FileLayoutState<'data, P> {
+    fn create_layout_state(self, args: &P::Args) -> FileLayoutState<'data, P> {
         match self {
             resolution::ResolvedFile::Object(s) => new_object_layout_state(s),
             resolution::ResolvedFile::Dynamic(s) => new_dynamic_object_layout_state(&s),
             resolution::ResolvedFile::Prelude(s) => {
-                FileLayoutState::Prelude(PreludeLayoutState::new(s))
+                FileLayoutState::Prelude(PreludeLayoutState::new(s, args))
             }
             resolution::ResolvedFile::NotLoaded(s) => FileLayoutState::NotLoaded(s),
             resolution::ResolvedFile::LinkerScript(s) => {
@@ -4907,7 +4900,10 @@ fn test_no_disallowed_overlaps() {
         output_sections.output_order(crate::output_kind::OutputKind::StaticExecutable(
             crate::args::RelocationModel::NonRelocatable,
         ));
-    let args = crate::args::elf::ElfArgs::default();
+    let mut args = crate::args::elf::ElfArgs::default();
+    if args.arch == crate::arch::Architecture::Unsupported {
+        args.arch = crate::arch::Architecture::X86_64;
+    }
     let section_part_sizes = output_sections.new_part_map::<u64>().map(|_, _| 7);
 
     let section_part_layouts = layout_section_parts::<Elf>(

@@ -681,7 +681,7 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
     parser
         .declare_with_param()
         .long("output")
-        .short("o")
+        .prefix("o")
         .help("Set the output filename")
         .execute(|args, _modifier_stack, value| {
             args.output = Arc::from(Path::new(value));
@@ -750,7 +750,7 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
     parser
         .declare()
         .long("no-pie")
-        .help("Do not create a position-dependent executable (default)")
+        .help("Do not create a position-independent executable (default)")
         .execute(|args, _modifier_stack| {
             args.relocation_model = RelocationModel::NonRelocatable;
             args.should_output_executable = true;
@@ -794,7 +794,7 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
             writeln!(stdout, "{}", parser.generate_help())?;
 
             // The following listing is something autoconf detection relies on.
-            writeln!(stdout, "wild: supported targets:elf64 -x86-64 elf64-littleaarch64 elf64-littleriscv elf64-loongarch")?;
+            writeln!(stdout, "wild: supported targets: elf64-x86-64 elf64-littleaarch64 elf64-littleriscv elf64-loongarch")?;
             writeln!(stdout, "wild: supported emulations: elf_x86_64 aarch64elf elf64lriscv elf64loongarch")?;
 
             std::process::exit(0);
@@ -1925,6 +1925,7 @@ mod tests {
         "elf_x86_64",
         "-dynamic-linker",
         "/lib64/ld-linux-x86-64.so.2",
+        "-o/tmp/a.out",
         "-o",
         "/build/target/debug/deps/c1-a212b73b12b6d123",
         "/lib/x86_64-linux-gnu/Scrt1.o",
@@ -2097,6 +2098,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "wasi", ignore = "wasi doesn't have a temp dir")]
     fn test_parse_file_only_options() {
         // Create a temporary file containing the same options (one per line) as INPUT1
         let file = NamedTempFile::new().expect("Could not create temp file");
@@ -2110,6 +2112,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "wasi", ignore = "wasi doesn't have a temp dir")]
     fn test_parse_mixed_file_and_inline_options() {
         // Create a temporary file containing some options
         let file = NamedTempFile::new().expect("Could not create temp file");
@@ -2129,6 +2132,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "wasi", ignore = "wasi doesn't have a temp dir")]
     fn test_parse_overlapping_file_and_inline_options() {
         // Create a set of file options that has a duplicate of an inline option
         let mut file_options = FILE_OPTIONS.to_vec();
@@ -2151,6 +2155,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "wasi", ignore = "wasi doesn't have a temp dir")]
     fn test_parse_recursive_file_option() {
         // Create a temporary file containing a @file option
         let file1 = NamedTempFile::new().expect("Could not create temp file");

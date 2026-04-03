@@ -212,7 +212,6 @@ use std::io::BufReader;
 use std::io::ErrorKind;
 use std::io::IsTerminal;
 use std::io::Read;
-use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -1826,18 +1825,8 @@ impl Program<'_> {
 
         let output = String::from_utf8_lossy(&output);
 
-        let exit_code = status.code().ok_or_else(|| {
-            let signal = status.signal().unwrap();
-            let possible_core_dumped_msg = if status.core_dumped() {
-                " (core dumped) "
-            } else {
-                ""
-            };
-            error!("Binary exited{possible_core_dumped_msg} with signal {signal}: {output}")
-        })?;
-
-        if exit_code != EXIT_SUCCESS {
-            bail!("Binary exited with unexpected exit code {exit_code}: {output}");
+        if status.code() != Some(EXIT_SUCCESS) {
+            bail!("Binary exited with unexpected {status}: {output}");
         }
 
         Ok(())
@@ -2839,6 +2828,7 @@ impl LinkCommand {
             let linker = libwild::Linker::new();
             let get_args = || std::iter::once("wild").chain(args.iter().copied());
             let mut parsed_args = libwild::Args::new(get_args)?;
+            parsed_args.set_version("integration-test");
             // Tests that are checking for warnings use a subprocess to capture output. For now, we
             // suppress warnings for tests that use libwild.
             parsed_args.on_warning(Box::new(|_| {}));
@@ -3054,6 +3044,16 @@ impl Assertions {
         if obj.kind() == ObjectKind::Relocatable {
             return Ok(());
         }
+
+        // Verify that the linker identity string is null-terminated.
+        let comment_section = obj.section_by_name(".comment");
+        if let Some(section) = comment_section {
+            let data = section.data()?;
+            if !data.is_empty() && data.last() != Some(&0) {
+                bail!(".comment section is not null-terminated");
+            }
+        }
+
         if self.expected_comments.is_empty() {
             match linker_used {
                 Linker::Wild => {
@@ -3364,7 +3364,7 @@ fn was_linked_with_wild(obj: &ElfFile64) -> bool {
     };
     actual_comments
         .iter()
-        .any(|comment| comment.starts_with("Linker: Wild version"))
+        .any(|comment| comment.starts_with("Linker: Wild "))
 }
 
 fn read_comments<'data>(obj: &ElfFile64<'data>) -> Result<Vec<std::borrow::Cow<'data, str>>> {

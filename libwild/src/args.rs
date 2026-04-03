@@ -89,6 +89,9 @@ pub struct CommonArgs {
     /// execution based on those arguments.
     #[debug(skip)]
     pub(crate) warning_callback: Box<WarningCallback>,
+
+    /// The version of the linker being used.
+    pub(crate) version: std::borrow::Cow<'static, str>,
 }
 
 pub type WarningCallback = dyn Fn(Warning) + Send + Sync + 'static;
@@ -117,8 +120,7 @@ impl Args {
         }
     }
 
-    /// Parse CLI arguments. Detects target format from `--target=<triple>`, `-m`,
-    /// or host default, then routes to the format-specific parser.
+    /// Parse CLI arguments. Runs format-specific parser based on the host target.
     pub fn parse<F: Fn() -> I, S: AsRef<str>, I: Iterator<Item = S>>(
         &mut self,
         input: F,
@@ -136,6 +138,11 @@ impl Args {
             Args::Elf(args) => args.parse(input),
             Args::MachO(args) => args.parse(input),
         }
+    }
+
+    /// Set the version identifier of the linker.
+    pub fn set_version(&mut self, version: &str) {
+        self.common_mut().version = std::borrow::Cow::Owned(version.to_owned());
     }
 
     /// Calls the callback whenever a warning is emitted. The default, if this method is never
@@ -236,6 +243,7 @@ impl Default for CommonArgs {
             sym_info: None,
             time_phase_options: None,
             warning_callback: Box::new(default_warning_callback),
+            version: std::borrow::Cow::Borrowed("unknown version"),
         }
     }
 }
@@ -288,6 +296,12 @@ impl CommonArgs {
         Ok(ThreadPool {
             _jobserver_tokens: tokens,
         })
+    }
+
+    /// Returns a string that identifies this linker. This is written into the .comment
+    /// section which usually also contains the versions of compilers that were used.
+    pub(crate) fn linker_identity(&self) -> String {
+        format!("Wild {} (compatible with GNU linkers)", self.version)
     }
 
     /// Adds a linker script to our outputs. Note, this is only called for scripts specified via
