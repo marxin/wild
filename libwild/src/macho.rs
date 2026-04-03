@@ -12,16 +12,22 @@ use crate::layout_rules::SectionKind;
 use crate::layout_rules::SectionRule;
 use crate::macho_writer;
 use crate::output_section_id;
+use crate::output_section_id::DATA_SEGMENT;
 use crate::output_section_id::FILE_HEADER;
 use crate::output_section_id::NUM_BUILT_IN_SECTIONS;
 use crate::output_section_id::OutputOrderBuilder;
 use crate::output_section_id::PAGEZERO_SEGMENT;
+use crate::output_section_id::STRTAB;
+use crate::output_section_id::SYMTAB_GLOBAL;
 use crate::output_section_id::SectionName;
 use crate::output_section_id::SectionOutputInfo;
+use crate::output_section_id::TEXT_SEGMENT;
 use crate::part_id;
 use crate::platform;
 use crate::platform::ObjectFile;
+use crate::platform::ProgramSegmentDef as _;
 use crate::symbol_db::Visibility;
+use itertools::Itertools;
 use linker_utils::elf::secnames;
 use object::Endian;
 use object::Endianness;
@@ -573,15 +579,21 @@ impl platform::NonAddressableIndexes for NonAddressableIndexes {
 pub(crate) enum SegmentType {
     Header,
     LoadCommand,
-    #[default]
+    // Sections belonging to __TEXT segment.
+    Text,
+    // Sections belonging to __DATA segment.
     Data,
+    // Sections belonging to __DATA_CONST segment.
+    DataConst,
+    #[default]
+    Misc,
 }
 
 impl platform::SegmentType for SegmentType {}
 
 #[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub(crate) struct ProgramSegmentDef {
-    segment_type: SegmentType,
+    pub(crate) segment_type: SegmentType,
 }
 
 impl std::fmt::Display for ProgramSegmentDef {
@@ -629,8 +641,10 @@ impl platform::ProgramSegmentDef for ProgramSegmentDef {
         self.segment_type
             == match section_id {
                 FILE_HEADER => SegmentType::Header,
-                PAGEZERO_SEGMENT => SegmentType::LoadCommand,
-                _ => SegmentType::Data,
+                PAGEZERO_SEGMENT | TEXT_SEGMENT | DATA_SEGMENT => SegmentType::LoadCommand,
+                TEXT => SegmentType::Text,
+                DATA => SegmentType::Data,
+                _ => SegmentType::Misc,
             }
     }
 }
@@ -659,6 +673,14 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
         kind: SectionKind::Primary(SectionName(b"PAGEZERO_SEGMENT")),
         target_segment_type: Some(SegmentType::LoadCommand),
     };
+    defs[output_section_id::TEXT_SEGMENT.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(b"TEXT_SEGMENT")),
+        target_segment_type: Some(SegmentType::LoadCommand),
+    };
+    defs[output_section_id::DATA_SEGMENT.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(b"DATA_SEGMENT")),
+        target_segment_type: Some(SegmentType::LoadCommand),
+    };
     defs[output_section_id::STRTAB.as_usize()] = BuiltInSectionDetails {
         kind: SectionKind::Primary(SectionName(secnames::STRTAB_SECTION_NAME)),
         ..DEFAULT_DEFS
@@ -670,11 +692,11 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
     };
     // Start of regular sections
     defs[output_section_id::TEXT.as_usize()] = BuiltInSectionDetails {
-        kind: SectionKind::Primary(SectionName(secnames::TEXT_SECTION_NAME)),
+        kind: SectionKind::Primary(SectionName(b"__text")),
         ..DEFAULT_DEFS
     };
     defs[output_section_id::DATA.as_usize()] = BuiltInSectionDetails {
-        kind: SectionKind::Primary(SectionName(secnames::DATA_SECTION_NAME)),
+        kind: SectionKind::Primary(SectionName(b"__data")),
         ..DEFAULT_DEFS
     };
 
@@ -1077,6 +1099,9 @@ impl platform::Platform for MachO {
             part_id::PAGEZERO_SEGMENT,
             size_of::<SegmentCommand>() as u64,
         );
+        sizes.increment(part_id::TEXT_SEGMENT, size_of::<SegmentCommand>() as u64);
+        sizes.increment(part_id::DATA_SEGMENT, size_of::<SegmentCommand>() as u64);
+        dbg!("allocate text segmet");
 
         // TODO
     }
@@ -1175,10 +1200,15 @@ impl platform::Platform for MachO {
     ) {
         let mut builder = OutputOrderBuilder::<Self>::new(output_kind, output_sections, secondary);
 
-        // TODO
+        // File header and all load commands.
         builder.add_section(output_section_id::FILE_HEADER);
         builder.add_section(output_section_id::PAGEZERO_SEGMENT);
+        builder.add_section(output_section_id::TEXT_SEGMENT);
+        builder.add_section(output_section_id::DATA_SEGMENT);
+        // Content of the sections (e.g. __text, __data).
         builder.add_section(output_section_id::TEXT);
+        builder.add_section(output_section_id::DATA);
+        // The rest (e.g. symbol table, string table).
 
         builder.build()
     }
@@ -1188,7 +1218,6 @@ impl platform::Platform for MachO {
 const DEFAULT_SECTION_RULES: &[SectionRule<'static>] = &[
     SectionRule::exact_section_keep(b"__text", crate::output_section_id::TEXT),
     SectionRule::exact_section_keep(b"__data", crate::output_section_id::DATA),
-    SectionRule::exact_section_keep(b"__cstring", crate::output_section_id::STRTAB),
     // SectionRule::exact_section_keep(b"__compact_unwind", crate::output_section_id::EH_FRAME),
 ];
 
@@ -1200,6 +1229,15 @@ const PROGRAM_SEGMENT_DEFS: &[ProgramSegmentDef] = &[
         segment_type: SegmentType::LoadCommand,
     },
     ProgramSegmentDef {
+        segment_type: SegmentType::Text,
+    },
+    ProgramSegmentDef {
         segment_type: SegmentType::Data,
+    },
+    ProgramSegmentDef {
+        segment_type: SegmentType::DataConst,
+    },
+    ProgramSegmentDef {
+        segment_type: SegmentType::Misc,
     },
 ];

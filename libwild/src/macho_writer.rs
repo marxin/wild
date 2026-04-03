@@ -1,3 +1,4 @@
+use crate::elf::ProgramSegmentDef;
 use crate::error;
 use crate::error::Context;
 use crate::error::Result;
@@ -12,6 +13,8 @@ use crate::layout::PreludeLayout;
 use crate::macho::FileHeader;
 use crate::macho::MachO;
 use crate::macho::SegmentCommand;
+use crate::macho::SegmentType;
+use crate::output_section_id::OrderEvent;
 use crate::output_section_part_map::OutputSectionPartMap;
 use crate::output_trace::TraceOutput;
 use crate::part_id;
@@ -100,18 +103,47 @@ fn write_prelude<'data, A: Arch<Platform = MachO>>(
 }
 
 fn populate_file_header<A: Arch<Platform = MachO>>(
-    _layout: &MachOLayout,
+    layout: &MachOLayout,
     _header_info: &HeaderInfo,
     header: &mut FileHeader,
 ) {
+    // TODO: can we do better?
+    let load_commands_size = layout
+        .segment_layouts
+        .segments
+        .iter()
+        .find(|seg| {
+            layout.program_segments.segment_def(seg.id).segment_type
+                == crate::macho::SegmentType::LoadCommand
+        })
+        .map_or(0, |seg| seg.sizes.file_size);
+    let commands = layout
+        .output_order
+        .into_iter()
+        .skip_while(|event| {
+            if let OrderEvent::SegmentStart(segment_id) = event {
+                layout
+                    .program_segments
+                    .segment_def(*segment_id)
+                    .segment_type
+                    != SegmentType::LoadCommand
+            } else {
+                true
+            }
+        })
+        .skip(1)
+        .take_while(|event| !matches!(event, OrderEvent::SegmentEnd(..)))
+        .count();
+    dbg!(commands);
+    dbg!(load_commands_size);
+
     header.magic = U32::new(BigEndian, MH_CIGAM_64);
     header.cputype = U32::new(LE, CPU_TYPE_ARM64);
     header.cpusubtype = U32::new(LE, 0);
     // TODO
     header.filetype = U32::new(LE, MH_EXECUTE);
-    // TODO
-    header.ncmds = U32::new(LE, 1);
-    header.sizeofcmds = U32::new(LE, 72);
+    header.ncmds = U32::new(LE, commands as u32);
+    header.sizeofcmds = U32::new(LE, load_commands_size as u32);
     header.flags = U32::new(LE, 0);
     header.reserved = U32::new(LE, 0);
 }
