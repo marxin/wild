@@ -90,6 +90,7 @@ pub(crate) mod validation;
 pub(crate) mod value_flags;
 pub(crate) mod verification;
 pub(crate) mod version_script;
+pub(crate) mod vfs;
 pub(crate) mod wasm;
 pub(crate) mod wasm_wasm32;
 pub(crate) mod wasm_writer;
@@ -134,6 +135,23 @@ pub fn run(mut args: Args) -> error::Result {
     drop(linker);
     timing::finalise_perfetto_trace()?;
     Ok(())
+}
+
+/// Runs the linker with all filesystem access replaced by the in-memory filesystem that was
+/// supplied via `Args::set_vfs`. Returns the files produced by the link, keyed by their output
+/// path: the linked binary at the path given by `-o`, plus any additional outputs such as the
+/// dependency file.
+pub fn run_with_vfs(mut args: Args) -> error::Result<Option<Vec<u8>>> {
+    let Some(vfs) = args.common().vfs.clone() else {
+        bail!("run_with_vfs requires that Args::set_vfs was called before parsing arguments");
+    };
+
+    let thread_pool = args.common_mut().activate_thread_pool()?;
+    let linker = Linker::new();
+    linker.run(&args, &thread_pool)?;
+    drop(linker);
+
+    Ok(vfs.take_output())
 }
 
 /// Sets up whatever tracing, if any, is indicated by the supplied arguments. This can only be

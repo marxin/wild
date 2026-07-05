@@ -100,6 +100,10 @@ pub struct CommonArgs {
     /// The version of the linker being used.
     pub(crate) version: std::borrow::Cow<'static, str>,
 
+    /// Shadow file system used for reading of the input files and emitting the output file.
+    #[debug(skip)]
+    pub(crate) vfs: Option<Arc<crate::vfs::Vfs>>,
+
     has_flavor: bool,
 }
 
@@ -177,6 +181,12 @@ impl Args {
     /// Set the version identifier of the linker.
     pub fn set_version(&mut self, version: &str) {
         self.common_mut().version = std::borrow::Cow::Owned(version.to_owned());
+    }
+
+    /// Supplies an in-memory filesystem that will be used in place of the real
+    /// filesystem for input files and the output file.
+    pub fn set_vfs(&mut self, files: HashMap<PathBuf, Vec<u8>>) {
+        self.common_mut().vfs = Some(Arc::new(crate::vfs::Vfs::new(files)));
     }
 
     /// Calls the callback whenever a warning is emitted. The default, if this method is never
@@ -324,6 +334,7 @@ impl Default for CommonArgs {
             time_phase_options: None,
             warning_callback: Box::new(default_warning_callback),
             version: std::borrow::Cow::Borrowed("unknown version"),
+            vfs: None,
             has_flavor: false,
         }
     }
@@ -336,6 +347,10 @@ fn default_warning_callback(warning: Warning) {
 }
 
 impl CommonArgs {
+    pub(crate) fn vfs(&self) -> Option<&crate::vfs::Vfs> {
+        self.vfs.as_deref()
+    }
+
     pub(crate) fn trace_span_for_file(
         &self,
         file_id: FileId,

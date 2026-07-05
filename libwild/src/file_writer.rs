@@ -24,6 +24,7 @@ use rayon::slice::ParallelSlice;
 use rayon::slice::ParallelSliceMut;
 use std::io::ErrorKind;
 use std::io::Write;
+use std::mem::take;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::path::Path;
@@ -35,6 +36,8 @@ pub struct Output {
     path: Arc<Path>,
     creator: FileCreator,
     config: OutputConfig,
+    /// If set, then the output is captured into this in-memory filesystem.
+    vfs: Option<Arc<crate::vfs::Vfs>>,
 }
 
 #[derive(Clone, Copy)]
@@ -42,6 +45,7 @@ struct OutputConfig {
     file_replacement_mode: FileReplacementMode,
     should_write_trace: bool,
     file_write_mode: Option<FileWriteMode>,
+    in_memory: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,10 +65,12 @@ enum FileCreator {
 }
 
 pub(crate) struct SizedOutput {
-    file: std::fs::File,
+    /// `None` when the output is captured in memory (see `Output::vfs`).
+    file: Option<std::fs::File>,
     pub(crate) out: OutputBuffer,
     path: Arc<Path>,
     pub(crate) trace: TraceOutput,
+    vfs: Option<Arc<crate::vfs::Vfs>>,
 }
 
 pub(crate) enum OutputBuffer {
@@ -155,10 +161,16 @@ struct SectionAllocation {
 
 impl Output {
     pub(crate) fn new(args: &impl platform::Args, output_kind: OutputKind) -> Output {
-        let file_replacement_mode = args
-            .common()
-            .file_replacement_mode
-            .unwrap_or_else(|| default_file_replacement_mode(args, output_kind));
+        let vfs = args.common().vfs.clone();
+        let in_memory = vfs.is_some();
+
+        let file_replacement_mode = if in_memory {
+            FileReplacementMode::UnlinkAndReplace
+        } else {
+            args.common()
+                .file_replacement_mode
+                .unwrap_or_else(|| default_file_replacement_mode(args, output_kind))
+        };
 
         let creator = if args.common().available_threads.get() > 1 {
             let (sized_output_sender, sized_output_recv) = std::sync::mpsc::channel();
@@ -175,9 +187,11 @@ impl Output {
             creator,
             config: OutputConfig {
                 file_replacement_mode,
-                should_write_trace: args.common().write_trace,
+                should_write_trace: args.common().write_trace && !in_memory,
                 file_write_mode: args.common().file_write_mode,
+                in_memory,
             },
+            vfs,
         }
     }
 
@@ -193,11 +207,14 @@ impl Output {
                 let path = self.path.clone();
 
                 let output_config = self.config;
+                let vfs = self.vfs.clone();
 
                 rayon::spawn(move || {
                     verbose_timing_phase!("Create output file");
 
-                    if output_config.file_replacement_mode == FileReplacementMode::UnlinkAndReplace
+                    if !output_config.in_memory
+                        && output_config.file_replacement_mode
+                            == FileReplacementMode::UnlinkAndReplace
                     {
                         // Rename the old output file so that we can create a new file in its place.
                         // Reusing the existing file would also be an option, but that wouldn't
@@ -221,7 +238,7 @@ impl Output {
                     }
 
                     // Create the output file.
-                    let sized_output = SizedOutput::new(path, output_config, size);
+                    let sized_output = SizedOutput::new(path, output_config, size, vfs);
 
                     // Pass it to the main thread, so that it can start writing it once layout
                     // finishes.
@@ -250,7 +267,9 @@ impl Output {
                 wait_for_sized_output(sized_output_recv)?
             }
             FileCreator::Regular { file_size } => {
-                delete_old_output(&self.path);
+                if !self.config.in_memory {
+                    delete_old_output(&self.path);
+                }
                 let file_size = file_size.context("set_size was never called")?;
                 self.create_file_non_lazily(file_size)?
             }
@@ -271,7 +290,7 @@ impl Output {
 
     fn create_file_non_lazily(&self, file_size: u64) -> Result<SizedOutput> {
         timing_phase!("Create output file");
-        SizedOutput::new(self.path.clone(), self.config, file_size)
+        SizedOutput::new(self.path.clone(), self.config, file_size, self.vfs.clone())
     }
 }
 
@@ -303,7 +322,22 @@ fn wait_for_sized_output(sized_output_recv: &Receiver<Result<SizedOutput>>) -> R
 }
 
 impl SizedOutput {
-    fn new(path: Arc<Path>, output_config: OutputConfig, file_size: u64) -> Result<SizedOutput> {
+    fn new(
+        path: Arc<Path>,
+        output_config: OutputConfig,
+        file_size: u64,
+        vfs: Option<Arc<crate::vfs::Vfs>>,
+    ) -> Result<SizedOutput> {
+        if output_config.in_memory {
+            return Ok(SizedOutput {
+                file: None,
+                out: OutputBuffer::InMemory(vec![0; file_size as usize]),
+                trace: TraceOutput::new(false, &path),
+                path,
+                vfs,
+            });
+        }
+
         let mut open_options = std::fs::OpenOptions::new();
 
         match output_config.file_replacement_mode {
@@ -341,25 +375,36 @@ impl SizedOutput {
         let trace = TraceOutput::new(output_config.should_write_trace, &path);
 
         Ok(SizedOutput {
-            file,
+            file: Some(file),
             out,
             path,
             trace,
+            vfs,
         })
     }
 
     fn flush(&mut self) -> Result {
-        match &self.out {
-            OutputBuffer::Mmap(_) => {}
-            OutputBuffer::InMemory(bytes) => self
-                .file
-                .write_all(bytes)
-                .with_context(|| format!("Failed to write to {}", self.path.display()))?,
+        match (&mut self.out, &self.file) {
+            (OutputBuffer::Mmap(_), _) => {}
+            (OutputBuffer::InMemory(bytes), Some(file)) => {
+                let mut file = file;
+                file.write_all(bytes)
+                    .with_context(|| format!("Failed to write to {}", self.path.display()))?;
+            }
+            (OutputBuffer::InMemory(bytes), None) => {
+                let vfs = self
+                    .vfs
+                    .as_ref()
+                    .expect("in-memory output requires an in-memory filesystem");
+                vfs.set_output(take(bytes));
+            }
         }
 
         // Making the file executable is best-effort only. For example if we're writing to a pipe or
         // something, it isn't going to work and that's OK.
-        let _ = crate::fs::make_executable(&self.file);
+        if let Some(file) = &self.file {
+            let _ = crate::fs::make_executable(file);
+        }
 
         Ok(())
     }

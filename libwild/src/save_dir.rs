@@ -371,7 +371,7 @@ impl SaveDirState {
                 }
             }
         } else {
-            if let Ok(data) = FileData::new(source_path, false) {
+            if let Ok(data) = FileData::new(source_path, false, None) {
                 match FileKind::identify_bytes(&data) {
                     Ok(FileKind::ThinArchive) => {
                         self.handle_thin_archive(source_path, parsed_args)?;
