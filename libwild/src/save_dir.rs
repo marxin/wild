@@ -370,7 +370,7 @@ impl SaveDirState {
                 }
             }
         } else {
-            if let Ok(data) = FileData::new(source_path, false) {
+            if let Ok(data) = FileData::new(source_path, false, None) {
                 match FileKind::identify_bytes(&data) {
                     Ok(FileKind::ThinArchive) => {
                         self.handle_thin_archive(source_path, parsed_args)?;
@@ -483,6 +483,11 @@ fn create_symlink(target: &Path, dest_path: &Path) -> Result {
     {
         let _ = (target, dest_path);
         bail!("creating symlinks on wasi not supported on stable rust");
+    }
+    #[cfg(not(any(unix, windows, target_os = "wasi")))]
+    {
+        let _ = (target, dest_path);
+        bail!("creating symlinks is not supported on this platform");
     }
 }
 
