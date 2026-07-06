@@ -8,7 +8,9 @@ use crate::input_data::InputBytes;
 use crate::input_data::InputLinkerScript;
 use crate::input_data::InputRef;
 use crate::layout_rules::LayoutRulesBuilder;
+use crate::layout_rules::LocationCounter;
 use crate::linker_script::Expression;
+use crate::output_section_id::LocationCounterIndex;
 use crate::output_section_id::OutputSectionId;
 use crate::platform::Args;
 use crate::platform::ObjectFile;
@@ -55,6 +57,7 @@ pub(crate) struct ProcessedLinkerScript<'data, P: Platform> {
     pub(crate) file_bytes: &'data [u8],
     pub(crate) memory_regions: Vec<crate::linker_script::MemoryRegion<'data>>,
     pub(crate) program_headers: Vec<crate::linker_script::Phdr<'data>>,
+    pub(crate) location_counters: Vec<LocationCounter<'data>>,
 }
 
 #[derive(Debug)]
@@ -98,12 +101,12 @@ pub(crate) enum SymbolPlacement<'data> {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) enum SymbolLoc<'data> {
-    SectionStart(OutputSectionId),
+pub(crate) enum SymbolLoc {
+    SectionStartRelative(OutputSectionId),
+    SectionEndRelative(OutputSectionId),
     SectionEnd(OutputSectionId),
     FirstSection,
-    Expression(Expression<'data>, Option<OutputSectionId>),
-    RelativeExpression(Expression<'data>, OutputSectionId),
+    LocationCounter(LocationCounterIndex, Option<OutputSectionId>),
     None,
 }
 
@@ -111,7 +114,7 @@ pub(crate) enum SymbolLoc<'data> {
 pub(crate) struct Redirect<'data> {
     pub(crate) kind: RedirectKind,
     pub(crate) expression: Expression<'data>,
-    pub(crate) loc: SymbolLoc<'data>,
+    pub(crate) loc: SymbolLoc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

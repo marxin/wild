@@ -37,6 +37,7 @@ pub(crate) fn evaluate_assertions<'data, P: Platform>(
     resolutions: &[Option<Resolution<P>>],
     sizeof_headers: u64,
     memory_regions: &HashMap<&[u8], layout::MemoryRegion>,
+    resolved_location_counters: &[ResolvedLocationCounter],
 ) -> Result {
     for group in &symbol_db.groups {
         let Group::LinkerScripts(scripts) = group else {
@@ -54,6 +55,7 @@ pub(crate) fn evaluate_assertions<'data, P: Platform>(
                     memory_regions,
                     symbol_db,
                     sizeof_headers,
+                    resolved_location_counters,
                     &|name| {
                         let Some(target_symbol_id) =
                             symbol_db.get_unversioned(&UnversionedSymbolName::prehashed(name))
@@ -82,19 +84,109 @@ pub(crate) fn evaluate_assertions<'data, P: Platform>(
     Ok(())
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct ResolvedLocationCounter {
+    pub(crate) value: u64,
+    pub(crate) section_offset: Option<u64>,
+}
+
+fn evaluate_location<'data, P: Platform>(
+    expr_loc: &SymbolLoc,
+    section_layouts: &OutputSectionMap<OutputRecordLayout>,
+    output_sections: &OutputSections<'data, P>,
+    resolved_location_counters: &[ResolvedLocationCounter],
+) -> Result<u64> {
+    match expr_loc {
+        SymbolLoc::SectionStartRelative(_) => Ok(0),
+        SymbolLoc::SectionEndRelative(id) => {
+            let primary_id = output_sections.primary_output_section(*id);
+            let primary_start = section_layouts.get(primary_id).mem_offset;
+            let id_layout = section_layouts.get(*id);
+            let id_end = id_layout.mem_offset + id_layout.mem_size;
+            Ok(id_end - primary_start)
+        }
+        SymbolLoc::SectionEnd(id) => {
+            let layout = section_layouts.get(*id);
+            Ok(layout.mem_offset + layout.mem_size)
+        }
+        SymbolLoc::FirstSection | SymbolLoc::None => Ok(0),
+        SymbolLoc::LocationCounter(idx, section_id) => {
+            let entry = resolved_location_counters.get(*idx).ok_or_else(|| {
+                crate::error!(
+                    "location counter index {idx} out of range (len: {})",
+                    resolved_location_counters.len()
+                )
+            })?;
+            if section_id.is_none() {
+                Ok(entry.value)
+            } else {
+                Ok(entry.section_offset.unwrap_or(0))
+            }
+        }
+    }
+}
+
 pub(crate) fn evaluate_expression<'data, P: Platform>(
     expr: &Expression<'data>,
-    expr_loc: &SymbolLoc<'data>,
+    expr_loc: &SymbolLoc,
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
     output_sections: &OutputSections<'data, P>,
     memory_regions: &HashMap<&[u8], layout::MemoryRegion>,
     symbol_db: &SymbolDb<'data, P>,
     sizeof_headers: u64,
+    resolved_location_counters: &[ResolvedLocationCounter],
+    symbol_resolution_callback: &dyn Fn(&[u8]) -> Result<u64>,
+) -> Result<u64> {
+    let mut has_section_relative_offset = true;
+    let value = evaluate_expression_value(
+        expr,
+        expr_loc,
+        section_layouts,
+        output_sections,
+        memory_regions,
+        symbol_db,
+        sizeof_headers,
+        resolved_location_counters,
+        &mut has_section_relative_offset,
+        symbol_resolution_callback,
+    )?;
+
+    let offset = if has_section_relative_offset {
+        match expr_loc {
+            SymbolLoc::SectionStartRelative(id) | SymbolLoc::SectionEndRelative(id) => {
+                let primary_id = output_sections.primary_output_section(*id);
+                let section_layout = section_layouts.get(primary_id);
+                section_layout.mem_offset
+            }
+            SymbolLoc::LocationCounter(_, Some(id)) => {
+                let primary_id = output_sections.primary_output_section(*id);
+                let section_layout = section_layouts.get(primary_id);
+                section_layout.mem_offset
+            }
+            _ => 0,
+        }
+    } else {
+        0
+    };
+
+    Ok(value + offset)
+}
+
+fn evaluate_expression_value<'data, P: Platform>(
+    expr: &Expression<'data>,
+    expr_loc: &SymbolLoc,
+    section_layouts: &OutputSectionMap<OutputRecordLayout>,
+    output_sections: &OutputSections<'data, P>,
+    memory_regions: &HashMap<&[u8], layout::MemoryRegion>,
+    symbol_db: &SymbolDb<'data, P>,
+    sizeof_headers: u64,
+    resolved_location_counters: &[ResolvedLocationCounter],
+    has_section_relative_offset: &mut bool,
     symbol_resolution_callback: &dyn Fn(&[u8]) -> Result<u64>,
 ) -> Result<u64> {
     macro_rules! eval {
         ($e:expr) => {
-            evaluate_expression(
+            evaluate_expression_value(
                 $e,
                 expr_loc,
                 section_layouts,
@@ -102,6 +194,8 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
                 memory_regions,
                 symbol_db,
                 sizeof_headers,
+                resolved_location_counters,
+                has_section_relative_offset,
                 symbol_resolution_callback,
             )
         };
@@ -110,18 +204,12 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
     match expr {
         Expression::Number(n) => Ok(*n),
 
-        Expression::LocationCounter => match expr_loc {
-            SymbolLoc::SectionStart(id) => Ok(section_layouts.get(*id).mem_offset),
-            SymbolLoc::SectionEnd(id) => {
-                let layout = section_layouts.get(*id);
-                Ok(layout.mem_offset + layout.mem_size)
-            }
-            SymbolLoc::FirstSection | SymbolLoc::None => Ok(0),
-            SymbolLoc::Expression(expr, _) => eval!(expr),
-            SymbolLoc::RelativeExpression(expr, id) => {
-                eval!(expr).map(|x| x + section_layouts.get(*id).mem_offset)
-            }
-        },
+        Expression::LocationCounter => evaluate_location(
+            expr_loc,
+            section_layouts,
+            output_sections,
+            resolved_location_counters,
+        ),
 
         Expression::Symbol(name) => symbol_resolution_callback(name),
 
@@ -157,13 +245,13 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
             if align == 0 {
                 bail!("ALIGN(0) is invalid");
             }
-            // NOTE: ALIGN(n) in a full linker script context means "align the current address
-            // to n". Here we always align 0 because the location counter is not threaded through
-            // expression evaluation. This gives correct results when used as a standalone value
-            // (e.g. ASSERT(ALIGN(4096) == 0, ...)) but not when combined with the location
-            // counter (e.g. ASSERT(. + ALIGN(4096) > x, ...)). Full support requires passing
-            // the current address into evaluate_expression.
-            Ok(0u64.wrapping_add(align - 1) & !(align - 1))
+            let location = evaluate_location(
+                expr_loc,
+                section_layouts,
+                output_sections,
+                resolved_location_counters,
+            )?;
+            Ok(location.wrapping_add(align - 1) & !(align - 1))
         }
 
         Expression::Min(l, r) => Ok(eval!(l)?.min(eval!(r)?)),
@@ -198,6 +286,7 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
             Ok(region.length)
         }
         Expression::SegmentStart(name, default_expr) => {
+            *has_section_relative_offset = false;
             if let Some(val) = symbol_db.args.segment_start_override(*name) {
                 Ok(val)
             } else {
@@ -368,6 +457,7 @@ mod tests {
                 &HashMap::new(),
                 symbol_db,
                 0,
+                &[],
                 &|_| Ok(1),
             )
         })
@@ -689,6 +779,7 @@ mod tests {
                 file_bytes: b"",
                 memory_regions: Vec::new(),
                 program_headers: Vec::new(),
+                location_counters: Vec::new(),
             },
             symbol_id_range: SymbolIdRange::empty(),
             file_id: FileId::new(0, 0),
@@ -709,8 +800,16 @@ mod tests {
             }]);
             symbol_db.add_group(group);
             assert!(
-                evaluate_assertions::<Elf>(symbol_db, layouts, sections, &[], 0, &HashMap::new())
-                    .is_ok()
+                evaluate_assertions::<Elf>(
+                    symbol_db,
+                    layouts,
+                    sections,
+                    &[],
+                    0,
+                    &HashMap::new(),
+                    &[]
+                )
+                .is_ok()
             );
         });
     }
@@ -724,9 +823,16 @@ mod tests {
                 remainder: b"",
             }]);
             symbol_db.add_group(group);
-            let err =
-                evaluate_assertions::<Elf>(symbol_db, layouts, sections, &[], 0, &HashMap::new())
-                    .unwrap_err();
+            let err = evaluate_assertions::<Elf>(
+                symbol_db,
+                layouts,
+                sections,
+                &[],
+                0,
+                &HashMap::new(),
+                &[],
+            )
+            .unwrap_err();
             assert!(err.to_string().contains("intentional failure"));
         });
     }
@@ -761,6 +867,7 @@ mod tests {
                     &regions,
                     symbol_db,
                     0,
+                    &[],
                     &|_| Ok(0),
                 )
             };

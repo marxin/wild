@@ -15,6 +15,7 @@ use crate::linker_script::ContentsCommand;
 use crate::linker_script::SectionCommand;
 use crate::output_section_id;
 use crate::output_section_id::OutputSectionId;
+use crate::output_section_id::SectionLocationInfo;
 use crate::output_section_id::SectionName;
 use crate::parsing::InternalSymDefInfo;
 use crate::parsing::ProcessedLinkerScript;
@@ -27,7 +28,6 @@ use crate::platform::SectionHeader;
 use glob::Pattern;
 use hashbrown::HashTable;
 use std::borrow::Cow;
-use std::mem::replace;
 
 pub(crate) struct LayoutRules<'data> {
     pub(crate) section_rules: SectionRules<'data>,
@@ -36,6 +36,7 @@ pub(crate) struct LayoutRules<'data> {
 #[derive(Default)]
 pub(crate) struct LayoutRulesBuilder<'data> {
     rules: Vec<SectionRule<'data>>,
+    num_location_counters: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,10 +133,16 @@ impl SectionOutputInfo {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LocationCounter<'data> {
+    Absolute(linker_script::Expression<'data>, SymbolLoc),
+    Relative(linker_script::Expression<'data>, SymbolLoc, OutputSectionId),
+}
+
 fn loc_for_global_expr<'data>(
     expr: &crate::linker_script::Expression<'data>,
     section_id: Option<OutputSectionId>,
-) -> SymbolLoc<'data> {
+) -> SymbolLoc {
     let mut loc = SymbolLoc::None;
     expr.visit_expressions(&mut |e| match e {
         crate::linker_script::Expression::SegmentStart(..) => {
@@ -162,9 +169,11 @@ impl<'data> LayoutRulesBuilder<'data> {
         let mut assertions = Vec::new();
         let mut memory_regions = Vec::new();
         let mut program_headers = Vec::new();
+        let mut location_counters = Vec::new();
 
         let mut current_section_id = None;
         let mut loc = SymbolLoc::FirstSection;
+        let mut last_lc_idx = self.num_location_counters;
 
         for cmd in &input.script.commands {
             if let linker_script::Command::Provide(provide) = cmd {
@@ -185,16 +194,7 @@ impl<'data> LayoutRulesBuilder<'data> {
                 });
                 symbol_defs.push(crate::parsing::InternalSymDefInfo::new(placement, name));
             } else if let linker_script::Command::Sections(sections) = cmd {
-                let mut location = None;
-
-                // "Extra alignment" is what we call it when a linker script sets alignment via a
-                // command like `. = ALIGN(8)`. We attach that to the subsequent section by
-                // adjusting its alignment. This doesn't exactly match what GNU ld does, since what
-                // we do can cause the alignment of the section in the section headers to increase,
-                // whereas GNU ld leaves the section header alignment alone in this case. For now,
-                // though, it doesn't seem worthwhile having two separate alignment properties on a
-                // section, one of which doesn't affect the header value.
-                let mut extra_min_alignment = alignment::MIN;
+                let mut section_start_lc_idx = last_lc_idx;
 
                 for sec_cmd in &sections.commands {
                     match sec_cmd {
@@ -215,48 +215,55 @@ impl<'data> LayoutRulesBuilder<'data> {
                                     }
                                 }
                             }
-                            let min_alignment = sec
-                                .alignment
-                                .unwrap_or(alignment::MIN)
-                                .max(replace(&mut extra_min_alignment, alignment::MIN));
+                            let min_alignment =
+                                sec.alignment.unwrap_or(alignment::MIN).max(alignment::MIN);
 
-                            // Choose starting location for this output section.
-                            let section_location = match &sec.start_address_expression {
-                                Some(address) => {
-                                    location.take();
-                                    Some(address.clone())
-                                }
-                                None => location.take(),
+                            let location_info = SectionLocationInfo {
+                                location_counters: (section_start_lc_idx, last_lc_idx),
+                                location: sec.start_address_expression.clone(),
+                                at_location: sec.at_address.clone(),
+                                is_top_level: true,
                             };
 
                             let primary_section_id = output_sections.add_named_section(
                                 SectionName(sec.output_section_name),
                                 min_alignment,
-                                section_location,
-                                sec.at_address.clone(),
                                 sec.phdr,
                                 sec.region,
+                                Some(location_info),
                             );
                             current_section_id = Some(primary_section_id);
                             loc = SymbolLoc::SectionEnd(primary_section_id);
 
                             let mut last_section_id = None;
-                            let mut last_symbol_loc = SymbolLoc::SectionStart(primary_section_id);
-                            let mut last_location = None;
+                            let mut last_symbol_loc =
+                                SymbolLoc::SectionStartRelative(primary_section_id);
+                            let mut inner_lc_idx = last_lc_idx;
+                            let mut inner_lc_start_idx = last_lc_idx;
 
                             for contents_cmd in &sec.commands {
                                 match contents_cmd {
                                     ContentsCommand::Matcher(matcher) => {
                                         let section_id = if last_section_id.is_none()
-                                            && last_location.is_none()
+                                            && inner_lc_idx == inner_lc_start_idx
                                         {
                                             primary_section_id
                                         } else {
+                                            let sec_location_info = SectionLocationInfo {
+                                                location_counters: (
+                                                    inner_lc_start_idx,
+                                                    inner_lc_idx,
+                                                ),
+                                                location: None,
+                                                at_location: None,
+                                                is_top_level: false,
+                                            };
+                                            inner_lc_start_idx = inner_lc_idx;
                                             output_sections.add_secondary_section(
                                                 primary_section_id,
-                                                replace(&mut extra_min_alignment, alignment::MIN),
+                                                alignment::MIN,
                                                 None,
-                                                last_location.take(),
+                                                Some(sec_location_info),
                                             )
                                         };
 
@@ -280,7 +287,7 @@ impl<'data> LayoutRulesBuilder<'data> {
                                         }
 
                                         last_section_id = Some(section_id);
-                                        last_symbol_loc = SymbolLoc::SectionEnd(section_id);
+                                        last_symbol_loc = SymbolLoc::SectionEndRelative(section_id);
                                     }
                                     ContentsCommand::SymbolAssignment(assignment) => {
                                         let placement = SymbolPlacement::Redirect(Redirect {
@@ -293,7 +300,6 @@ impl<'data> LayoutRulesBuilder<'data> {
                                             assignment.name,
                                         ));
                                     }
-                                    ContentsCommand::Align(a) => extra_min_alignment = *a,
                                     ContentsCommand::Provide(provide) => {
                                         let placement = SymbolPlacement::Redirect(Redirect {
                                             kind: RedirectKind::Script,
@@ -306,16 +312,16 @@ impl<'data> LayoutRulesBuilder<'data> {
                                         );
                                     }
                                     ContentsCommand::SetLocation(location) => {
-                                        last_location = Some(linker_script::Expression::Add(
-                                            Box::new(linker_script::Expression::Addr(
-                                                sec.output_section_name,
-                                            )),
-                                            Box::new(location.address.clone()),
-                                        ));
-                                        last_symbol_loc = SymbolLoc::RelativeExpression(
+                                        location_counters.push(LocationCounter::Relative(
                                             location.address.clone(),
+                                            last_symbol_loc,
                                             primary_section_id,
+                                        ));
+                                        last_symbol_loc = SymbolLoc::LocationCounter(
+                                            inner_lc_idx,
+                                            Some(primary_section_id),
                                         );
+                                        inner_lc_idx += 1;
                                     }
                                     // The CONSTRUCTORS command is used in legacy file formats only.
                                     // On ELF it is a nop.
@@ -323,31 +329,33 @@ impl<'data> LayoutRulesBuilder<'data> {
                                     ContentsCommand::Constructors => (),
                                 }
                             }
-                            if let Some(location) = last_location.take() {
+                            if inner_lc_idx > inner_lc_start_idx {
+                                let trailing_lc_info = SectionLocationInfo {
+                                    location_counters: (inner_lc_start_idx, inner_lc_idx),
+                                    location: None,
+                                    at_location: None,
+                                    is_top_level: false,
+                                };
                                 output_sections.add_secondary_section(
                                     primary_section_id,
                                     alignment::MIN,
                                     None,
-                                    Some(location),
+                                    Some(trailing_lc_info),
                                 );
                             }
+                            last_lc_idx = inner_lc_idx;
+                            section_start_lc_idx = last_lc_idx;
                         }
                         SectionCommand::SetLocation(new_location) => {
-                            let section_id = match loc {
-                                SymbolLoc::Expression(_, section_id) => section_id,
-                                SymbolLoc::SectionStart(section_id)
-                                | SymbolLoc::SectionEnd(section_id)
-                                | SymbolLoc::RelativeExpression(_, section_id) => Some(section_id),
-                                _ => None,
-                            };
-                            loc = SymbolLoc::Expression(new_location.address.clone(), section_id);
-                            if current_section_id.is_none() {
+                            location_counters
+                                .push(LocationCounter::Absolute(new_location.address.clone(), loc));
+                            loc = SymbolLoc::LocationCounter(last_lc_idx, None);
+                            if current_section_id.is_none() && self.num_location_counters == 0 {
                                 output_sections.set_base_address(new_location.address.clone());
-                                continue;
+                                section_start_lc_idx = location_counters.len();
                             }
-                            location = Some(new_location.address.clone());
+                            last_lc_idx += 1;
                         }
-                        SectionCommand::Align(a) => extra_min_alignment = *a,
                         SectionCommand::Assert(assert_cmd) => {
                             assertions.push(assert_cmd.clone());
                         }
@@ -381,6 +389,8 @@ impl<'data> LayoutRulesBuilder<'data> {
             }
         }
 
+        self.num_location_counters += location_counters.len();
+
         Ok(ProcessedLinkerScript {
             symbol_defs,
             assertions,
@@ -392,6 +402,7 @@ impl<'data> LayoutRulesBuilder<'data> {
             file_bytes: input.script_bytes,
             memory_regions,
             program_headers,
+            location_counters,
         })
     }
 
