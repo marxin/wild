@@ -82,7 +82,7 @@ end lists the features required to link the Linux kernel.
 | `MIN(a, b)` | ✅ | |
 | `MAX(a, b)` | ✅ | |
 | Ternary operator (`condition ? a : b`) | ✅ | |
-| `DEFINED(sym)` | 📅 | |
+| `DEFINED(sym)` | ✅ | |
 | `SIZEOF_HEADERS` | ✅ | |
 | `SEGMENT_START(segment, default)` | ✅ | Supports `"text"`, `"data"`, `"bss"`, `"rodata"`; returns `-Ttext`/`-Tdata`/`-Tbss` override if provided, otherwise `default`; unknown segment names always return `default` |
 
@@ -122,6 +122,6 @@ see at a glance what remains before Wild can link the kernel.
 | `CONSTRUCTORS` command | ✅ | Parsed and ignored, it is a nop for ELF.  |
 | `PHDRS` command for explicit program header definition | 🧪 | The FILEHDR and PHDRS keywords aren't yet supported. |
 | Ternary operator (`condition ? a : b`) | ✅ | |
-| `DEFINED(sym)` function | 📅 | |
+| `DEFINED(sym)` function | ✅ | |
 | `SIZEOF_HEADERS` built-in symbol | ✅ | |
 | `/DISCARD/` command | ✅ | |

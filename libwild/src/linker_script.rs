@@ -169,7 +169,8 @@ pub(crate) struct Phdr<'a> {
 /// - Bitwise: &, |, ^, ~, <<, >>
 /// - Logical: &&, ||
 /// - Unary: -, !, ~
-/// - Functions: SIZEOF, ALIGNOF, LENGTH, ORIGIN, ADDR, LOADADDR, ALIGN, MIN, MAX, SEGMENT_START
+/// - Functions: SIZEOF, ALIGNOF, LENGTH, ORIGIN, ADDR, LOADADDR, ALIGN, MIN, MAX, SEGMENT_START,
+///   DEFINED
 /// - Numbers (hex/decimal), symbols, location counter (.)
 /// - Parentheses for grouping
 /// - Ternary operator (? :)
@@ -228,6 +229,7 @@ pub(crate) enum Expression<'a> {
         Box<Expression<'a>>,
         Box<Expression<'a>>,
     ),
+    Defined(&'a [u8]),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -260,7 +262,8 @@ impl<'a> Expression<'a> {
             | Expression::Addr(_)
             | Expression::Loadaddr(_)
             | Expression::Symbol(_)
-            | Expression::SizeofHeaders => {}
+            | Expression::SizeofHeaders
+            | Expression::Defined(_) => {}
             Expression::Add(l, r)
             | Expression::Subtract(l, r)
             | Expression::Multiply(l, r)
@@ -924,6 +927,10 @@ fn parse_identifier_or_function<'a>(input: &mut &'a BStr) -> winnow::Result<Expr
                     segment_name,
                     Box::new(default_expr),
                 ))
+            }
+            b"DEFINED" => {
+                let symbol = parse_function_arg.parse_next(input)?;
+                Ok(Expression::Defined(symbol))
             }
             _ => Err(ContextError::default()),
         }
