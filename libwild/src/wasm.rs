@@ -21,6 +21,7 @@ use crate::wasm_writer::OutputImport;
 use crate::wasm_writer::OutputImportEntity;
 use hashbrown::HashMap;
 use hashbrown::HashSet;
+use leb128::write::signed_len as sleb128_size;
 use leb128::write::unsigned_len as uleb128_size;
 use linker_utils::utils::u32_from_slice;
 use rayon::prelude::*;
@@ -1715,9 +1716,9 @@ fn wasm_data_segment_encoded_size(kind: &DataKind<'_>, data_len: usize) -> Resul
     }
 }
 
-/// Byte length of the offset `expr` we emit (`i32.const` + LEB + `end`).
+/// Byte length of the offset `expr` we emit (`i32.const` + SLEB + `end`).
 fn output_i32_const_init_expr_size(offset: u32) -> u32 {
-    1 + uleb128_size(u64::from(offset)) as u32 + 1
+    1 + sleb128_size(i64::from(offset)) as u32 + 1
 }
 
 fn output_data_segment_encoded_size(
@@ -1788,6 +1789,15 @@ fn classify_data_relocations(
     per_segment
 }
 
+/// Align `data_end` to [`STACK_ALIGNMENT`], then add the stack size.
+fn stack_high_after_data(data_end: u32) -> Result<u32> {
+    let stack_base = u32::try_from(crate::alignment::STACK_ALIGNMENT.align_up(u64::from(data_end)))
+        .map_err(|_| crate::error!("Wasm stack base overflow"))?;
+    stack_base
+        .checked_add(LINKER_STACK_SIZE)
+        .ok_or_else(|| crate::error!("Wasm stack pointer overflow"))
+}
+
 fn layout_object_data<'data>(
     input: &WasmObjectLayoutInput<'data>,
     index_map: &WasmObjectIndexMap,
@@ -1803,6 +1813,14 @@ fn layout_object_data<'data>(
         };
         let output_memory_index =
             remap_wasm_index(&index_map.memory_indices, memory_index, "memory")?;
+        // Linking `SegmentInfo.alignment` is a power-of-two exponent.
+        let align = input
+            .segment_alignments
+            .get(segment_index)
+            .copied()
+            .unwrap_or(crate::alignment::MIN);
+        *memory_cursor = u32::try_from(align.align_up(u64::from(*memory_cursor)))
+            .map_err(|_| crate::error!("Wasm data segment alignment overflow"))?;
         let output_memory_offset = *memory_cursor;
         let output_section_offset = *section_cursor;
         let encoded_output_size = output_data_segment_encoded_size(
@@ -2002,6 +2020,7 @@ struct WasmObjectLayoutInput<'data> {
     unsupported_output: Vec<&'static str>,
     code_relocations: Vec<WasmRelocation>,
     data_segments: Vec<WasmDataSegment<'data>>,
+    segment_alignments: Vec<Alignment>,
     data_relocations: Vec<WasmRelocation>,
     symbols: Vec<WasmSymbol>,
     init_funcs: Vec<WasmInitFunc>,
@@ -2190,6 +2209,7 @@ impl<'data> WasmObjectLayoutInput<'data> {
             unsupported_output,
             code_relocations,
             data_segments,
+            segment_alignments: file.segments.iter().map(|s| s.alignment).collect(),
             data_relocations,
             symbols: file.symbols.clone(),
             init_funcs: file.init_funcs.clone(),
@@ -3040,10 +3060,7 @@ fn fill_linker_defined_values(
     needs_stack_gap: bool,
 ) -> Result {
     if let Some(defined_slot) = indices.stack_pointer_defined_slot {
-        let sp = layout
-            .data_end
-            .checked_add(LINKER_STACK_SIZE)
-            .ok_or_else(|| crate::error!("Wasm stack pointer overflow"))?;
+        let sp = stack_high_after_data(layout.data_end)?;
         let global = layout
             .globals
             .get_mut(defined_slot as usize)
@@ -3057,8 +3074,7 @@ fn fill_linker_defined_values(
 
     let mut bytes_needed = u64::from(layout.data_end.max(layout.memory_base));
     if indices.stack_pointer_defined_slot.is_some() || needs_stack_gap {
-        bytes_needed =
-            bytes_needed.max(u64::from(layout.data_end.saturating_add(LINKER_STACK_SIZE)));
+        bytes_needed = bytes_needed.max(u64::from(stack_high_after_data(layout.data_end)?));
     }
     if bytes_needed > 0 && !layout.memories.is_empty() {
         let pages_needed = bytes_needed.div_ceil(65536).max(1);
@@ -3508,18 +3524,10 @@ fn linker_defined_data_symbol_address(
             address: data_end,
             needs_stack_gap: false,
         })),
-        b"__heap_base" => {
-            let address = data_end
-                .checked_add(LINKER_STACK_SIZE)
-                .ok_or_else(|| crate::error!("Wasm __heap_base address overflow"))?;
-            Ok(Some(LinkerDefinedDataAddress {
-                address,
-                // We place the stack in [data_end, data_end + LINKER_STACK_SIZE) and define
-                // __heap_base as the end of that range (same as initial __stack_pointer). The
-                // address itself therefore requires that memory cover the stack gap.
-                needs_stack_gap: true,
-            }))
-        }
+        b"__heap_base" => Ok(Some(LinkerDefinedDataAddress {
+            address: stack_high_after_data(data_end)?,
+            needs_stack_gap: true,
+        })),
         _ => Ok(None),
     }
 }
@@ -4486,11 +4494,21 @@ mod tests {
         let hb = linker_defined_data_symbol_address(b"__heap_base", data_end)
             .unwrap()
             .expect("__heap_base");
-        assert_eq!(hb.address, data_end + LINKER_STACK_SIZE);
+        assert_eq!(hb.address, stack_high_after_data(data_end).unwrap());
         assert!(
             hb.needs_stack_gap,
             "`__heap_base` sits past the stack gap, so memory must cover that range"
         );
+    }
+
+    #[test]
+    fn stack_high_is_sixteen_byte_aligned() {
+        // Unaligned data_end must still yield a 16-byte-aligned stack top (wasm-ld).
+        for data_end in [1u32, 2, 7, 1025, 4738] {
+            let sp = stack_high_after_data(data_end).unwrap();
+            assert_eq!(sp % 16, 0, "data_end={data_end} sp={sp}");
+            assert!(sp >= data_end + LINKER_STACK_SIZE);
+        }
     }
 
     #[test]
