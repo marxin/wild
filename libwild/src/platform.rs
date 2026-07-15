@@ -723,6 +723,8 @@ pub(crate) trait Platform:
         raw_value: u64,
         dynamic_symbol_index: Option<NonZeroU32>,
         memory_offsets: &mut OutputSectionPartMap<u64>,
+        args: &Self::Args,
+        output_kind: OutputKind,
     ) -> layout::Resolution<Self>;
 
     fn validate_resolution(

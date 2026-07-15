@@ -240,6 +240,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         &finalise_sizes_resources,
     )?;
 
+    let got_relr_n = *section_part_sizes.get(part_id::GOT_RELR) / 8;
     let thunk_blocks = thunk_layout_builder
         .map(|builder| {
             builder.build(
@@ -457,6 +458,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
     let mut layout = Layout {
         symbol_db,
         symbol_resolutions,
+        got_relr_n,
         segment_layouts,
         section_part_layouts,
         section_layouts,
@@ -717,6 +719,7 @@ fn compute_total_file_size(section_layouts: &OutputSectionMap<OutputRecordLayout
 pub struct Layout<'data, P: Platform> {
     pub(crate) symbol_db: SymbolDb<'data, P>,
     pub(crate) symbol_resolutions: SymbolResolutions<P>,
+    pub(crate) got_relr_n: u64,
     pub(crate) section_part_layouts: OutputSectionPartMap<OutputRecordLayout>,
 
     pub(crate) section_layouts: OutputSectionMap<OutputRecordLayout>,
@@ -3678,6 +3681,8 @@ fn create_internal_symbol_resolution<'data, P: Platform>(
         raw_value,
         None,
         memory_offsets,
+        resources.symbol_db.args,
+        resources.symbol_db.output_kind,
     ))
 }
 
@@ -4445,6 +4450,8 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
             raw_value,
             dynamic_symbol_index,
             memory_offsets,
+            resources.symbol_db.args,
+            resources.symbol_db.output_kind,
         )))
     }
 
@@ -4678,7 +4685,14 @@ pub(crate) fn default_create_resolutions<'data, P: Platform>(
             .symbol_db
             .flags_for_symbol(resources.per_symbol_flags, symbol_id);
         if flags.has_resolution() && resources.symbol_db.is_canonical(symbol_id) {
-            resolutions_out.write(Some(P::create_resolution(flags, 0, None, memory_offsets)))?;
+            resolutions_out.write(Some(P::create_resolution(
+                flags,
+                0,
+                None,
+                memory_offsets,
+                resources.symbol_db.args,
+                resources.symbol_db.output_kind,
+            )))?;
         } else {
             resolutions_out.write(None)?;
         }
@@ -5928,12 +5942,20 @@ fn verify_consistent_allocation_handling<P: Platform>(
     P::allocate_resolution(flags, &mut mem_sizes, output_kind, args);
     let mut memory_offsets = output_sections.new_part_map();
     *memory_offsets.get_mut(part_id::GOT) = 0x10;
+    *memory_offsets.get_mut(part_id::GOT_RELR) = 0x10;
     *memory_offsets.get_mut(part_id::PLT_GOT) = 0x10;
     let has_dynamic_symbol =
         flags.is_dynamic() || (flags.needs_export_dynamic() && flags.is_interposable());
     let dynamic_symbol_index = has_dynamic_symbol.then(|| NonZeroU32::new(1).unwrap());
 
-    let resolution = P::create_resolution(flags, 0, dynamic_symbol_index, &mut memory_offsets);
+    let resolution = P::create_resolution(
+        flags,
+        0,
+        dynamic_symbol_index,
+        &mut memory_offsets,
+        args,
+        output_kind,
+    );
 
     P::verify_resolution_allocation(
         &output_sections,

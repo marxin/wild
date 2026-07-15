@@ -653,8 +653,14 @@ impl platform::Platform for Elf {
                 );
             }
 
-            let resolution =
-                Self::create_resolution(flags, address, dynamic_symbol_index, memory_offsets);
+            let resolution = Self::create_resolution(
+                flags,
+                address,
+                dynamic_symbol_index,
+                memory_offsets,
+                resources.symbol_db.args,
+                resources.symbol_db.output_kind,
+            );
 
             resolutions_out.write(Some(resolution))?;
         }
@@ -1320,6 +1326,14 @@ impl platform::Platform for Elf {
         if args.hash_style.includes_sysv() {
             allocate_sysv_hash(state, current_sizes, extra_sizes, dynamic_symbol_defs)?;
         }
+        if args.is_relr_enabled() {
+            let got_relr_size = *current_sizes.get(part_id::GOT_RELR);
+            let n = got_relr_size / RELR_ENTRY_SIZE;
+            let relr_entries = got_relr_bitmap_relr_count(n);
+            if relr_entries > 0 {
+                extra_sizes.increment(part_id::RELR_DYN, relr_entries * RELR_ENTRY_SIZE);
+            }
+        }
         Ok(())
     }
 
@@ -1445,7 +1459,12 @@ impl platform::Platform for Elf {
             flags.is_dynamic() || (flags.needs_export_dynamic() && flags.is_interposable());
 
         if flags.needs_got() && !flags.is_tls() {
-            mem_sizes.increment(part_id::GOT, elf::GOT_ENTRY_SIZE);
+            let is_got_relr = is_got_relr_eligible(flags, has_dynamic_symbol, args, output_kind);
+            if is_got_relr {
+                mem_sizes.increment(part_id::GOT_RELR, elf::GOT_ENTRY_SIZE);
+            } else {
+                mem_sizes.increment(part_id::GOT, elf::GOT_ENTRY_SIZE);
+            }
             if flags.needs_plt() {
                 mem_sizes.increment(part_id::PLT_GOT, elf::PLT_ENTRY_SIZE);
             }
@@ -1454,15 +1473,13 @@ impl platform::Platform for Elf {
             } else if has_dynamic_symbol {
                 mem_sizes.increment(part_id::RELA_DYN_GENERAL, elf::RELA_ENTRY_SIZE);
             } else if flags.is_address() && output_kind.is_relocatable() {
-                if args.is_relr_enabled() {
-                    // TODO: Implement bitmap packing for GOT-based RELR entries.
-                    // Currently counts flat (one entry per GOT slot) to match the
-                    // writer's write_relr_entry_flat. Bitmap packing requires splitting
-                    // the GOT so relative relocations are contiguous.
+                if args.is_relr_enabled() && !is_got_relr {
+                    // Flat RELR for section boundary symbols (not bitmap-packed)
                     mem_sizes.increment(part_id::RELR_DYN, elf::RELR_ENTRY_SIZE);
-                } else {
+                } else if !args.is_relr_enabled() {
                     mem_sizes.increment(part_id::RELA_DYN_RELATIVE, elf::RELA_ENTRY_SIZE);
                 }
+                // is_got_relr=true: RELR entries counted by post_compute_sizes
             }
         }
 
@@ -1632,6 +1649,8 @@ impl platform::Platform for Elf {
         raw_value: u64,
         dynamic_symbol_index: Option<NonZeroU32>,
         memory_offsets: &mut OutputSectionPartMap<u64>,
+        args: &<Elf as Platform>::Args,
+        output_kind: OutputKind,
     ) -> Resolution<Elf> {
         let mut resolution: Resolution<Elf> = Resolution {
             raw_value,
@@ -1657,8 +1676,14 @@ impl platform::Platform for Elf {
             } else {
                 1
             };
-            resolution.format_specific.got_address =
-                Some(allocate_got(num_got_entries, memory_offsets));
+            let has_dynamic_symbol =
+                flags.is_dynamic() || (flags.needs_export_dynamic() && flags.is_interposable());
+            let is_got_relr = is_got_relr_eligible(flags, has_dynamic_symbol, args, output_kind);
+            resolution.format_specific.got_address = if is_got_relr && num_got_entries == 1 {
+                Some(allocate_got_relr(memory_offsets))
+            } else {
+                Some(allocate_got(num_got_entries, memory_offsets))
+            };
         } else if flags.is_tls() {
             // Handle the TLS GOT addresses where we can combine up to 3 different access methods.
             let mut num_got_slots = 0;
@@ -1675,7 +1700,14 @@ impl platform::Platform for Elf {
             resolution.format_specific.got_address =
                 Some(allocate_got(num_got_slots, memory_offsets));
         } else if flags.needs_got() {
-            resolution.format_specific.got_address = Some(allocate_got(1, memory_offsets));
+            let has_dynamic_symbol =
+                flags.is_dynamic() || (flags.needs_export_dynamic() && flags.is_interposable());
+            let is_got_relr = is_got_relr_eligible(flags, has_dynamic_symbol, args, output_kind);
+            resolution.format_specific.got_address = if is_got_relr {
+                Some(allocate_got_relr(memory_offsets))
+            } else {
+                Some(allocate_got(1, memory_offsets))
+            };
         }
 
         resolution
@@ -3289,6 +3321,7 @@ pub(crate) const RELA_ENTRY_SIZE: u64 = size_of::<Rela>() as u64;
 pub(crate) const RELR_ENTRY_SIZE: u64 = size_of::<Relr>() as u64;
 
 pub(crate) const SYMTAB_ENTRY_SIZE: u64 = size_of::<SymtabEntry>() as u64;
+pub(crate) const RELR_BITMAP_SLOTS: u64 = 63;
 pub(crate) const SYMTAB_SHNDX_ENTRY_SIZE: u64 = size_of::<SymtabShndxEntry>() as u64;
 pub(crate) const GNU_VERSION_ENTRY_SIZE: u64 = size_of::<Versym>() as u64;
 
@@ -4686,6 +4719,12 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
         is_relro: true,
         ..DEFAULT_DEFS
     };
+    defs[output_section_id::GOT_RELR.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Secondary(output_section_id::GOT),
+        element_size: crate::elf::GOT_ENTRY_SIZE,
+        min_alignment: alignment::GOT_ENTRY,
+        ..DEFAULT_DEFS
+    };
     defs[output_section_id::PLT_GOT.as_usize()] = BuiltInSectionDetails {
         kind: SectionKind::Primary(SectionName(PLT_GOT_SECTION_NAME)),
         ty: sht::PROGBITS,
@@ -5146,7 +5185,6 @@ fn process_relocation<'data, 'scope, A: Arch<Platform = Elf>, R: Relocation>(
                 // bitmap marker), so fall back to RELA for them.
                 if resources.symbol_db.args.is_relr_enabled() && rel.offset().is_multiple_of(2) {
                     let offset = rel.offset();
-                    const BITMAP_SLOTS: u64 = 63;
                     const WORD_SIZE: u64 = 8;
                     *relr_run = match *relr_run {
                         RelrRunState::NoRun => {
@@ -5162,7 +5200,7 @@ fn process_relocation<'data, 'scope, A: Arch<Platform = Elf>, R: Relocation>(
                             has_bitmap,
                         } => {
                             let d = offset.wrapping_sub(bitmap_base);
-                            if d % WORD_SIZE == 0 && d < BITMAP_SLOTS * WORD_SIZE {
+                            if d % WORD_SIZE == 0 && d < RELR_BITMAP_SLOTS * WORD_SIZE {
                                 // Fits in current bitmap window.
                                 if !has_bitmap {
                                     // First member in this window: allocate bitmap entry.
@@ -5176,9 +5214,11 @@ fn process_relocation<'data, 'scope, A: Arch<Platform = Elf>, R: Relocation>(
                                 // Current window has bits — try next window.
                                 // lld only advances to a new bitmap if the current one is
                                 // non-empty (breaks on empty bitmap). Same rule here.
-                                let next_base = bitmap_base + BITMAP_SLOTS * WORD_SIZE;
+                                let next_base = bitmap_base + RELR_BITMAP_SLOTS * WORD_SIZE;
                                 let d2 = offset.wrapping_sub(next_base);
-                                if d2.is_multiple_of(WORD_SIZE) && d2 < BITMAP_SLOTS * WORD_SIZE {
+                                if d2.is_multiple_of(WORD_SIZE)
+                                    && d2 < RELR_BITMAP_SLOTS * WORD_SIZE
+                                {
                                     // Fits in next window — new bitmap entry, advance window.
                                     common.allocate(part_id::RELR_DYN, elf::RELR_ENTRY_SIZE);
                                     bitmap_base = next_base;
@@ -5304,9 +5344,39 @@ pub(crate) struct SymtabShndxEntry {
     pub(crate) _shndx: u32,
 }
 
+/// Returns true if this GOT entry should go to GOT_RELR (bitmap-packed)
+/// rather than GOT (flat RELR or RELA).
+pub(crate) fn is_got_relr_eligible(
+    flags: ValueFlags,
+    has_dynamic_symbol: bool,
+    args: &ElfArgs,
+    output_kind: OutputKind,
+) -> bool {
+    args.is_relr_enabled()
+        && !flags.is_ifunc()
+        && !has_dynamic_symbol
+        && flags.is_address()
+        && !flags.is_downgraded_to_local()
+        && output_kind.is_relocatable()
+}
+
+fn got_relr_bitmap_relr_count(n: u64) -> u64 {
+    if n == 0 {
+        0
+    } else {
+        1 + n.saturating_sub(1).div_ceil(RELR_BITMAP_SLOTS)
+    }
+}
+
 fn allocate_got(num_entries: u64, memory_offsets: &mut OutputSectionPartMap<u64>) -> NonZeroU64 {
     let got_address = NonZeroU64::new(*memory_offsets.get(part_id::GOT)).unwrap();
     memory_offsets.increment(part_id::GOT, elf::GOT_ENTRY_SIZE * num_entries);
+    got_address
+}
+
+fn allocate_got_relr(memory_offsets: &mut OutputSectionPartMap<u64>) -> NonZeroU64 {
+    let got_address = NonZeroU64::new(*memory_offsets.get(part_id::GOT_RELR)).unwrap();
+    memory_offsets.increment(part_id::GOT_RELR, elf::GOT_ENTRY_SIZE);
     got_address
 }
 
