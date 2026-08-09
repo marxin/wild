@@ -1266,10 +1266,14 @@ impl platform::Platform for MachO {
     }
 
     fn create_linker_defined_symbols(
-        _symbols: &mut crate::parsing::InternalSymbolsBuilder<Self>,
+        symbols: &mut crate::parsing::InternalSymbolsBuilder<Self>,
         _output_kind: crate::output_kind::OutputKind,
         _args: &Self::Args,
     ) {
+        // Mach-O object symbol names include the C ABI's leading underscore.
+        symbols
+            .section_start(crate::output_section_id::FILE_HEADER, "___dso_handle")
+            .hide();
     }
 
     fn built_in_section_infos<'data>()
