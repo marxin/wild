@@ -1274,6 +1274,7 @@ impl platform::Platform for MachO {
         section_index: object::SectionIndex,
         scope: &rayon::Scope<'scope>,
     ) -> Result {
+        // TODO
         for rel in state.relocations(section_index)?.relocations {
             process_relocation::<A>(state, rel, section_index, resources, queue, scope)?;
         }
