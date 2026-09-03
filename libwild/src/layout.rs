@@ -4296,6 +4296,13 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
             scope,
         )?;
 
+        // Platform-specific relocation processing may consume the input section and mark it as
+        // discarded, while still using its relocations to retain referenced sections.
+        if matches!(self.sections[section_index.0], SectionSlot::Discard) {
+            tracing::debug!(managed_section = %self.object.section_display_name(section_index), file = %self.input);
+            return Ok(());
+        }
+
         tracing::debug!(loaded_section = %self.object.section_display_name(section_index), file = %self.input);
 
         self.sections[section_index.0] = if unloaded.needs_sorting {

@@ -282,6 +282,7 @@ fn write_epilogue(
 ) -> Result {
     verbose_timing_phase!("Write epilogue");
     write_chained_fixup_table(layout, buffers.get_mut(part_id::CHAINED_FIXUP_TABLE))?;
+    write_init_offsets(layout, buffers.get_mut(part_id::INIT_OFFSETS))?;
     let out = buffers.get_mut(part_id::EXPORTS_TRIE);
     ensure!(
         exports_trie.len() <= out.len(),
@@ -290,6 +291,37 @@ fn write_epilogue(
     out[..exports_trie.len()].copy_from_slice(exports_trie);
     out[exports_trie.len()..].fill(0);
 
+    Ok(())
+}
+
+fn write_init_offsets(layout: &MachOLayout<'_>, out: &mut [u8]) -> Result {
+    // TODO: add helper for text_segment (multiple uses)
+    let text_segment = layout
+        .segment_layouts
+        .segments
+        .iter()
+        .find(|segment| layout.program_segments.segment_def(segment.id).name == SegmentName::TEXT)
+        .context("Missing Mach-O __TEXT segment")?
+        .sizes
+        .mem_offset;
+
+    let chunks = out.as_chunks_mut::<4>();
+    ensure!(
+        chunks.1.is_empty(),
+        "Mach-O initializer must be a multiple of 4"
+    );
+    for (&address, slot) in layout
+        .format_specific
+        .init_function_addresses
+        .iter()
+        .zip(chunks.0)
+    {
+        let offset = address
+            .checked_sub(text_segment)
+            .context("Mach-O initializer is before the __TEXT segment")?;
+        let offset = u32::try_from(offset).context("Mach-O initializer offset exceeds 32 bits")?;
+        slot.copy_from_slice(&offset.to_le_bytes());
+    }
     Ok(())
 }
 
