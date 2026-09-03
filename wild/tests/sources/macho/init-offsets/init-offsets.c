@@ -5,6 +5,6 @@
 static int state;
 
 __attribute__((constructor)) static void first(void) { state = 1; }
-__attribute__((constructor)) static void second(void) { state = state * 10 + 2; }
+__attribute__((constructor)) static void second(void) { state = state * 40 + 2; }
 
-int main(void) { return state == 12 ? 42 : 1; }
+int main(void) { return state; }
