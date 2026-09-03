@@ -22,6 +22,7 @@ use crate::layout::SymbolCopyInfo;
 use crate::layout::SymbolResolutions;
 use crate::layout_rules::SectionKind;
 use crate::layout_rules::SectionRule;
+use crate::layout_rules::SectionRuleOutcome;
 use crate::macho::output_section_id::CHAINED_FIXUP_TABLE;
 use crate::macho::output_section_id::CODE_SIGNATURE;
 use crate::macho::output_section_id::EXPORTS_TRIE;
@@ -618,7 +619,8 @@ impl platform::SectionHeader for SectionHeader {
     }
 
     fn should_retain(&self) -> bool {
-        self.flags.get(LE).typ() == macho::S_MOD_INIT_FUNC_POINTERS
+        // TODO
+        false
     }
 
     fn should_exclude(&self) -> bool {
@@ -1272,34 +1274,9 @@ impl platform::Platform for MachO {
         section_index: object::SectionIndex,
         scope: &rayon::Scope<'scope>,
     ) -> Result {
-        let header = state.object.section(section_index)?;
-        let relocations = state.relocations(section_index)?.relocations;
-
-        for rel in relocations {
+        for rel in state.relocations(section_index)?.relocations {
             process_relocation::<A>(state, rel, section_index, resources, queue, scope)?;
         }
-
-        // Process the __DATA,__mod_init_func section.
-        if header.flags.get(LE).typ() == macho::S_MOD_INIT_FUNC_POINTERS {
-            for rel in relocations {
-                let info = rel.info(LE);
-                ensure!(
-                    info.r_extern
-                        && !info.r_pcrel
-                        && info.r_length == 3
-                        && info.r_type == macho::ARM64_RELOC_UNSIGNED,
-                    "unsupported Mach-O initializer relocation"
-                );
-                state.format_specific.init_functions.push(
-                    state
-                        .symbol_id_range
-                        .input_to_id(SymbolIndex(info.r_symbolnum as usize)),
-                );
-            }
-
-            state.sections[section_index.0] = resolution::SectionSlot::Discard;
-        }
-
         Ok(())
     }
 
@@ -1482,6 +1459,45 @@ impl platform::Platform for MachO {
         _scope: &rayon::Scope<'scope>,
     ) -> Result {
         todo!()
+    }
+
+    fn process_init_func_section<'data, 'scope, A: platform::Arch<Platform = Self>>(
+        object: &mut crate::layout::ObjectLayoutState<'data, Self>,
+        _common: &mut crate::layout::CommonGroupState<'data, Self>,
+        section_index: object::SectionIndex,
+        resources: &'scope crate::layout::GraphResources<'data, '_, Self>,
+        queue: &mut crate::layout::LocalWorkQueue<Self>,
+        scope: &rayon::Scope<'scope>,
+    ) -> Result {
+        let header = object.object.section(section_index)?;
+        ensure!(
+            header.flags.get(LE).typ() == macho::S_MOD_INIT_FUNC_POINTERS,
+            "Mach-O __mod_init_func section has an unexpected section type"
+        );
+
+        for rel in object
+            .relocations(section_index)?
+            .relocations
+            .iter()
+            .sorted_unstable_by_key(|rel| rel.info(LE).r_address)
+        {
+            let info = rel.info(LE);
+            ensure!(
+                info.r_extern
+                    && !info.r_pcrel
+                    && info.r_length == 3
+                    && info.r_type == macho::ARM64_RELOC_UNSIGNED,
+                "unsupported Mach-O initializer relocation"
+            );
+            object.format_specific.init_functions.push(
+                object
+                    .symbol_id_range
+                    .input_to_id(SymbolIndex(info.r_symbolnum as usize)),
+            );
+            process_relocation::<A>(object, rel, section_index, resources, queue, scope)?;
+        }
+
+        Ok(())
     }
 
     fn non_empty_section_loaded<'data, 'scope, A: platform::Arch<Platform = Self>>(
@@ -2182,6 +2198,7 @@ fn allocate_plt(memory_offsets: &mut OutputSectionPartMap<u64>) -> NonZeroU64 {
 }
 
 const DEFAULT_SECTION_RULES: &[SectionRule<'static>] = &[
+    SectionRule::exact(b"__mod_init_func", SectionRuleOutcome::InitFunc),
     // TODO: Add a Mach-O output section ID and rule for `__compact_unwind`.
 ];
 
