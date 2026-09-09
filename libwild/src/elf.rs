@@ -1676,7 +1676,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         dynamic_symbol_definitions: &[DynamicSymbolDefinition<'data, Self>],
         properties: &LayoutExt,
         symbol_db: &SymbolDb<'data, Self>,
-    ) {
+    ) -> Result<()> {
         if symbol_db.output_kind.needs_dynamic() {
             let dynamic_entry_size = C::DYNAMIC_ENTRY_SIZE as usize;
             mem_sizes.increment(
@@ -1777,6 +1777,8 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
             );
             state.verdefs.replace(verdefs);
         }
+
+        Ok(())
     }
 
     fn finalise_layout_epilogue<'data>(

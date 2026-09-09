@@ -60,6 +60,7 @@ use object::macho::N_EXT;
 use object::macho::N_PEXT;
 use object::macho::N_SECT;
 use object::macho::N_WEAK_DEF;
+use object::macho::RelocationInfo;
 use object::macho::S_ATTR_EXT_RELOC;
 use object::macho::S_ATTR_LOC_RELOC;
 use object::macho::S_ATTR_PURE_INSTRUCTIONS;
@@ -78,9 +79,11 @@ use object::read::macho::Nlist;
 use object::read::macho::Section;
 use object::read::macho::Segment;
 use std::borrow::Cow;
+use std::mem::offset_of;
 use std::num::NonZeroU8;
 use std::num::NonZeroU64;
 use std::slice::Iter;
+use zerocopy::FromBytes;
 
 #[derive(Debug, Copy, Clone, Default)]
 pub(crate) struct MachO;
@@ -111,6 +114,7 @@ enum SinglePartSectionId {
     ChainedFixupTable,
     ExportsTrie,
     InitOffsets,
+    UnwindInfo,
 
     // Must be last.
     Count,
@@ -129,6 +133,7 @@ pub(crate) mod part_id {
     pub(crate) const CHAINED_FIXUP_TABLE: PartId = SinglePartSectionId::ChainedFixupTable.part_id();
     pub(crate) const EXPORTS_TRIE: PartId = SinglePartSectionId::ExportsTrie.part_id();
     pub(crate) const INIT_OFFSETS: PartId = SinglePartSectionId::InitOffsets.part_id();
+    pub(crate) const COMPACT_UNWIND: PartId = SinglePartSectionId::UnwindInfo.part_id();
 }
 
 pub(crate) mod output_section_id {
@@ -152,6 +157,8 @@ pub(crate) mod output_section_id {
         SinglePartSectionId::ExportsTrie.output_section_id();
     pub(crate) const INIT_OFFSETS: OutputSectionId =
         SinglePartSectionId::InitOffsets.output_section_id();
+    pub(crate) const UNWIND_INFO: OutputSectionId =
+        SinglePartSectionId::UnwindInfo.output_section_id();
 }
 
 const LE: Endianness = Endianness::Little;
@@ -230,6 +237,36 @@ pub(crate) fn load_dylib_command_size(path: &[u8]) -> usize {
     (size_of::<DylibCommand>() + path.len() + 1).next_multiple_of(MACHO_COMMAND_ALIGNMENT)
 }
 
+#[derive(FromBytes, Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct UnwindInfoEntry {
+    pub(crate) start: u64,
+    pub(crate) length: u32,
+    pub(crate) encoding: u32,
+    pub(crate) personality: u64,
+    pub(crate) lsda: u64,
+}
+
+pub(crate) const START_FIELD_OFFSET: usize = offset_of!(UnwindInfoEntry, start);
+pub(crate) const PERSONALITY_FIELD_OFFSET: usize = offset_of!(UnwindInfoEntry, personality);
+pub(crate) const LSDA_FIELD_OFFSET: usize = offset_of!(UnwindInfoEntry, lsda);
+
+#[derive(Debug)]
+pub(crate) struct UnwindInfoWithRelocs {
+    pub(crate) entry: UnwindInfoEntry,
+    pub(crate) start_relocation: Option<RelocationInfo>,
+    pub(crate) personality: Option<SymbolId>,
+    pub(crate) lsda_relocation: Option<RelocationInfo>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ResolvedUnwindInfo {
+    pub(crate) entry: UnwindInfoEntry,
+    pub(crate) start_address: u64,
+    pub(crate) personality_address: u64,
+    pub(crate) lsda_address: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct SegmentName([u8; 16]);
 
@@ -270,6 +307,7 @@ pub(crate) struct LayoutExt {
     pub(crate) imported_symbols: Vec<ImportedSymbolWithResolution>,
     /// Final addresses of initializer functions, in input relocation order.
     pub(crate) init_function_addresses: Vec<u64>,
+    pub(crate) unwind_info_entries: Vec<UnwindInfoWithRelocs>,
 }
 
 #[derive(Debug, Default)]
@@ -277,11 +315,13 @@ pub(crate) struct FinaliseSizesExt {
     imported_libraries: Vec<FileId>,
     imported_symbols: Vec<SymbolId>,
     init_functions: Vec<SymbolId>,
+    unwind_info_entries: Vec<UnwindInfoWithRelocs>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct ObjectLayoutStateExt {
     init_functions: Vec<SymbolId>,
+    unwind_info_entries: Vec<UnwindInfoWithRelocs>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -425,8 +465,12 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
             .ok_or(error!("section index out of range"))
     }
 
-    fn section_by_name(&self, _name: &str) -> Option<(object::SectionIndex, &SectionHeader)> {
-        todo!()
+    fn section_by_name(&self, name: &str) -> Option<(object::SectionIndex, &SectionHeader)> {
+        self.sections()
+            .iter()
+            .enumerate()
+            .find(|(_, section)| section.name() == name.as_bytes())
+            .map(|(index, section)| (object::SectionIndex(index), section))
     }
 
     fn symbol_section(
@@ -626,7 +670,7 @@ impl platform::SectionHeader for SectionHeader {
     fn should_exclude(&self) -> bool {
         // TODO: We need support for sections backed by the Mach-O indirect symbol table for dynamic
         // linking.
-        self.flags.get(LE).intersects(macho::S_ATTR_DEBUG)
+        (self.flags.get(LE).intersects(macho::S_ATTR_DEBUG) && self.name() != b"__compact_unwind")
             || matches!(
                 SegmentName::from_bytes(self.segment_name()),
                 SegmentName::PAGEZERO | SegmentName::LINKEDIT | SegmentName::LLVM
@@ -1049,6 +1093,7 @@ impl platform::Platform for MachO {
         output_section_id::CHAINED_FIXUP_TABLE,
         output_section_id::EXPORTS_TRIE,
         output_section_id::CODE_SIGNATURE,
+        output_section_id::UNWIND_INFO,
     ];
 
     type File<'data> = File<'data>;
@@ -1371,6 +1416,7 @@ impl platform::Platform for MachO {
         let mut imported_libraries = Vec::new();
         let mut imported_symbols = Vec::new();
         let mut init_functions = Vec::new();
+        let mut unwind_info_entries = Vec::new();
 
         for group in groups {
             for file in &group.files {
@@ -1382,6 +1428,20 @@ impl platform::Platform for MachO {
                                 .init_functions
                                 .iter()
                                 .map(|local_symbol_id| symbol_db.definition(*local_symbol_id)),
+                        );
+                        unwind_info_entries.extend(
+                            state
+                                .format_specific
+                                .unwind_info_entries
+                                .iter()
+                                .map(|entry| UnwindInfoWithRelocs {
+                                    entry: entry.entry,
+                                    personality: entry
+                                        .personality
+                                        .map(|personality| symbol_db.definition(personality)),
+                                    lsda_relocation: entry.lsda_relocation,
+                                    start_relocation: entry.start_relocation,
+                                }),
                         );
                     }
                     layout::FileLayoutState::StubLibrary(state) => {
@@ -1407,6 +1467,7 @@ impl platform::Platform for MachO {
             imported_libraries,
             imported_symbols,
             init_functions,
+            unwind_info_entries,
         })
     }
 
@@ -1453,6 +1514,7 @@ impl platform::Platform for MachO {
                     })
             })
             .collect::<Result<Vec<_>>>()?;
+        layout_ext.unwind_info_entries = finalise_sizes_ext.unwind_info_entries;
 
         Ok(layout_ext)
     }
@@ -1503,6 +1565,78 @@ impl platform::Platform for MachO {
             );
             process_relocation::<A>(object, rel, section_index, resources, queue, scope)?;
         }
+
+        Ok(())
+    }
+
+    fn process_compact_unwind_section<'data, 'scope, A: platform::Arch<Platform = Self>>(
+        object: &mut crate::layout::ObjectLayoutState<'data, Self>,
+        _common: &mut crate::layout::CommonGroupState<'data, Self>,
+        section_index: object::SectionIndex,
+        _resources: &'scope crate::layout::GraphResources<'data, '_, Self>,
+        _queue: &mut crate::layout::LocalWorkQueue<Self>,
+        _scope: &rayon::Scope<'scope>,
+    ) -> Result {
+        let header = object.object.section(section_index)?;
+        let data = header
+            .data(LE, object.object.data, u64::from(header.offset(LE)))
+            .context("cannot read compact unwind section data")?;
+
+        const ENTRY_LEN: usize = size_of::<UnwindInfoEntry>();
+        let chunks = data.as_chunks::<ENTRY_LEN>();
+        ensure!(
+            chunks.1.is_empty(),
+            "compact unwind info has an invalid size"
+        );
+
+        let mut entries = chunks
+            .0
+            .iter()
+            .map(|chunk| UnwindInfoWithRelocs {
+                entry: UnwindInfoEntry::read_from_bytes(chunk).unwrap(),
+                start_relocation: None,
+                personality: None,
+                lsda_relocation: None,
+            })
+            .collect_vec();
+
+        for rel in object.relocations(section_index)?.relocations {
+            let info = rel.info(LE);
+            ensure!(
+                !info.r_pcrel && info.r_length == 3 && info.r_type == macho::ARM64_RELOC_UNSIGNED,
+                "unsupported Mach-O compact unwind relocation"
+            );
+
+            // TODO: add validation for present __text, and __gcc_except_tab relocations
+            // let gcc_except_table_sec = object.object.section_by_name("__gcc_except_tab");
+            // let text_sec = object.object.section_by_name("__text");
+
+            let address = info.r_address as usize;
+            let entry = entries
+                .get_mut(address / ENTRY_LEN)
+                .context("missing unwind info entry for a relocation")?;
+
+            match address % ENTRY_LEN {
+                START_FIELD_OFFSET => {
+                    entry.start_relocation = Some(info);
+                }
+                PERSONALITY_FIELD_OFFSET => {
+                    ensure!(info.r_extern, "personality symbol missing in relocation");
+                    let symbol_id = object
+                        .symbol_id_range
+                        .input_to_id(SymbolIndex(info.r_symbolnum as usize));
+
+                    entry.personality = Some(symbol_id);
+                }
+                LSDA_FIELD_OFFSET => {
+                    entry.lsda_relocation = Some(info);
+                }
+                // TODO
+                _ => todo!(),
+            }
+        }
+
+        object.format_specific.unwind_info_entries.extend(entries);
 
         Ok(())
     }
@@ -1566,7 +1700,7 @@ impl platform::Platform for MachO {
         dynamic_symbol_definitions: &[crate::layout::DynamicSymbolDefinition<'data, Self>],
         format_specific: &Self::FinaliseSizesExt<'data>,
         symbol_db: &crate::symbol_db::SymbolDb<'data, Self>,
-    ) {
+    ) -> Result<()> {
         let mut fixup_table_size = CHAINED_FIXUP_TABLE_BASE_SIZE;
 
         fixup_table_size += state
@@ -1614,6 +1748,15 @@ impl platform::Platform for MachO {
             part_id::INIT_OFFSETS,
             format_specific.init_functions.len() as u64 * INIT_OFFSET_ENTRY_SIZE,
         );
+
+        mem_sizes.increment(
+            part_id::COMPACT_UNWIND,
+            dbg!(crate::compact_unwind::output_size(
+                &format_specific.unwind_info_entries
+            )?),
+        );
+
+        Ok(())
     }
 
     fn finalise_sizes_all<'data>(
@@ -1931,6 +2074,7 @@ impl platform::Platform for MachO {
             SegmentName::TEXT,
         );
         builder.add_section(output_section_id::INIT_OFFSETS);
+        builder.add_section(output_section_id::UNWIND_INFO);
 
         builder.add_section(output_section_id::PLT_GOT);
         add_sections_in_segment(&mut builder, output_sections, &custom.ro, SegmentName::TEXT);
@@ -2166,6 +2310,22 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
         section_flags: macho::S_INIT_FUNC_OFFSETS.to_flags(),
         min_alignment: Alignment { exponent: 2 },
     };
+    defs[output_section_id::INIT_OFFSETS.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionIdentity::new(
+            SectionName(b"__init_offsets"),
+            Some(SegmentName::TEXT),
+        )),
+        section_flags: macho::S_INIT_FUNC_OFFSETS.to_flags(),
+        min_alignment: Alignment { exponent: 2 },
+    };
+    defs[output_section_id::UNWIND_INFO.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionIdentity::new(
+            SectionName(b"__unwind_info"),
+            Some(SegmentName::TEXT),
+        )),
+        min_alignment: Alignment { exponent: 2 },
+        ..DEFAULT_DEFS
+    };
 
     defs
 };
@@ -2206,6 +2366,7 @@ fn allocate_plt(memory_offsets: &mut OutputSectionPartMap<u64>) -> NonZeroU64 {
 
 const DEFAULT_SECTION_RULES: &[SectionRule<'static>] = &[
     SectionRule::exact(b"__mod_init_func", SectionRuleOutcome::InitFunc),
+    SectionRule::exact(b"__compact_unwind", SectionRuleOutcome::CompactUnwind),
     // TODO: Add a Mach-O output section ID and rule for `__compact_unwind`.
 ];
 

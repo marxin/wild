@@ -43,6 +43,7 @@ use crate::macho::MACHO_START_MEM_ADDRESS;
 use crate::macho::MAX_SEGMENT_COUNT;
 use crate::macho::MachO;
 use crate::macho::PLT_ENTRY_SIZE;
+use crate::macho::ResolvedUnwindInfo;
 use crate::macho::SectionEntry;
 use crate::macho::SectionFlags;
 use crate::macho::SegmentCommand;
@@ -295,6 +296,15 @@ fn write_epilogue(
     out[..exports_trie.len()].copy_from_slice(exports_trie);
     out[exports_trie.len()..].fill(0);
 
+    let serialized_compact_unwind = build_compact_unwind(layout)?;
+    let out = buffers.get_mut(part_id::COMPACT_UNWIND);
+    ensure!(
+        serialized_compact_unwind.len() <= out.len(),
+        "Mach-O compact unwind exceeded its reserved size"
+    );
+    out[..serialized_compact_unwind.len()].copy_from_slice(&serialized_compact_unwind);
+    out[serialized_compact_unwind.len()..].fill(0);
+
     Ok(())
 }
 
@@ -376,6 +386,29 @@ fn build_exports_trie(layout: &MachOLayout<'_>) -> Result<Vec<u8>> {
         .collect::<Result<Vec<_>>>()?;
 
     Ok(crate::trie::build(&mut symbols))
+}
+
+fn build_compact_unwind(layout: &MachOLayout<'_>) -> Result<Vec<u8>> {
+    let unwind_infos = layout
+        .format_specific
+        .unwind_info_entries
+        .iter()
+        .map(|entry| -> Result<ResolvedUnwindInfo> {
+            Ok(ResolvedUnwindInfo {
+                entry: entry.entry,
+                // personality_address: entry
+                //     .personality
+                //     .and_then(|personality| layout.symbol_resolutions.get(personality))
+                //     .context("Missing resolution for personality symbol")?
+                //     .raw_value,
+                personality_address: 111,
+                start_address: 1234,
+                lsda_address: 5678,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(crate::compact_unwind::build(&unwind_infos)?)
 }
 
 fn exported_symbol_is_weak(layout: &MachOLayout<'_>, symbol_id: SymbolId) -> Result<bool> {

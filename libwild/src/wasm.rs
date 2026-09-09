@@ -7,12 +7,14 @@ use crate::error::Context as _;
 use crate::error::Result;
 use crate::input_data::PRELUDE_FILE_ID;
 use crate::layout;
+use crate::layout::OutputRecordLayout;
 use crate::layout_rules::SectionKind;
 use crate::layout_rules::SectionRule;
 use crate::layout_rules::SectionRuleOutcome;
 use crate::output_section_id::OutputSectionId;
 use crate::output_section_id::SectionIdentity;
 use crate::output_section_id::SectionName;
+use crate::output_section_map::OutputSectionMap;
 use crate::part_id::PartId;
 use crate::platform;
 use crate::platform::Args as _;
@@ -6980,10 +6982,11 @@ impl platform::Platform for Wasm {
         _dynamic_symbol_definitions: &[crate::layout::DynamicSymbolDefinition<'data, Self>],
         properties: &Self::LayoutExt<'data>,
         _symbol_db: &crate::symbol_db::SymbolDb<'data, Self>,
-    ) {
+    ) -> Result<()> {
         properties.encoded_sections.add_sizes_to(mem_sizes);
         properties.add_code_section_size(mem_sizes);
         properties.add_data_section_size(mem_sizes);
+        Ok(())
     }
 
     fn finalise_sizes_all<'data>(
