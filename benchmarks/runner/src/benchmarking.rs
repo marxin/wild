@@ -196,7 +196,7 @@ fn run_once(
 
     let start = Instant::now();
 
-    let mut child = command
+    let child = command
         .spawn()
         .with_context(|| format!("Failed to run {command:?}"))?;
 
