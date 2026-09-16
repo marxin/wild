@@ -410,12 +410,16 @@ fn build_compact_unwind(layout: &MachOLayout<'_>, section_size: usize) -> Result
                 + entry.entry.start;
 
             let personality_address = entry
-                .personality_relocation
-                .map(|rel| -> Result<u64> {
-                    Ok(get_resolution(rel, object_layout, layout)
-                        .context("missing unwind info relocation")?
-                        .0
-                        .value())
+                .personality_symbol_id
+                .map(|symbol_id| -> Result<u64> {
+                    Ok(layout
+                        .symbol_resolutions
+                        .get(symbol_id)
+                        .context("missing unwind personality resolution")?
+                        .format_specific
+                        .got_address
+                        .context("missing unwind personality GOT slot")?
+                        .get())
                 })
                 .transpose()?;
             let lsda_address = entry
@@ -430,10 +434,6 @@ fn build_compact_unwind(layout: &MachOLayout<'_>, section_size: usize) -> Result
                         + entry.entry.lsda)
                 })
                 .transpose()?;
-            ensure!(
-                personality_address.is_some() == lsda_address.is_some(),
-                "Cannot have personality relocation without LSDA relocation"
-            );
 
             Ok(ResolvedUnwindInfo {
                 entry: entry.entry,

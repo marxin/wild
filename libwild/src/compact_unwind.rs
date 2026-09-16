@@ -155,7 +155,7 @@ pub(crate) fn output_size(unwind_info_entries: &[UnwindInfoWithRelocs]) -> Resul
 
     let lsdas = unwind_info_entries
         .iter()
-        .filter_map(|entry| entry.personality_relocation)
+        .filter_map(|entry| entry.lsda_relocation)
         .count();
 
     let compressed_pages = unwind_info_entries
@@ -167,7 +167,7 @@ pub(crate) fn output_size(unwind_info_entries: &[UnwindInfoWithRelocs]) -> Resul
     let page_entries_total_size = (compressed_pages + 1) * size_of::<PageEntry>();
     let root_total_size = size_of::<CompactUnwindInfoHeader>()
         + encoding_values * size_of::<u32>()
-        + personalities_to_idx.len() * size_of::<u64>()
+        + personalities_to_idx.len() * size_of::<u32>()
         + lsdas * size_of::<LsdaEntry>();
 
     let size = compressed_pages_total_size + page_entries_total_size + root_total_size;
@@ -250,8 +250,13 @@ pub(crate) fn build(
     let encoding_size = encoding_values.as_bytes().len();
     let personalities = personalities
         .iter()
-        .map(|(_, address)| *address)
-        .collect_vec();
+        .map(|(_, address)| -> Result<u32> {
+            let offset = address
+                .checked_sub(text_segment_start)
+                .context("personality GOT slot is before the image base")?;
+            Ok(u32::try_from(offset).context("personality GOT offset exceeds 32 bits")?)
+        })
+        .collect::<Result<Vec<_>>>()?;
     let personalities_size = personalities.as_bytes().len();
 
     let header = CompactUnwindInfoHeader {

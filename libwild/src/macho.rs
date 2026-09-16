@@ -279,6 +279,7 @@ pub(crate) struct UnwindInfoWithRelocs {
 pub(crate) struct ResolvedUnwindInfo {
     pub(crate) entry: UnwindInfoEntry,
     pub(crate) start_address: u64,
+    // Personality function GOT slot address.
     pub(crate) personality_address: Option<u64>,
     // Definition of the personality symbol used for getting the function index
     // that's added to the `encoding`.
@@ -1357,7 +1358,16 @@ impl platform::Platform for MachO {
     ) -> Result {
         // TODO
         for rel in state.relocations(section_index)?.relocations {
-            process_relocation::<A>(state, common, rel, section_index, resources, queue, scope)?;
+            process_relocation::<A>(
+                state,
+                common,
+                rel,
+                section_index,
+                false,
+                resources,
+                queue,
+                scope,
+            )?;
         }
         Ok(())
     }
@@ -1624,7 +1634,16 @@ impl platform::Platform for MachO {
                     .symbol_id_range
                     .input_to_id(SymbolIndex(info.r_symbolnum as usize)),
             );
-            process_relocation::<A>(object, common, rel, section_index, resources, queue, scope)?;
+            process_relocation::<A>(
+                object,
+                common,
+                rel,
+                section_index,
+                false,
+                resources,
+                queue,
+                scope,
+            )?;
         }
 
         Ok(())
@@ -1682,23 +1701,26 @@ impl platform::Platform for MachO {
                 "unsupported Mach-O compact unwind relocation"
             );
 
+            let address = info.r_address as usize;
+            let relocation_field_offset = address % ENTRY_LEN;
             let classified_relocation = process_relocation::<A>(
                 object,
                 common,
                 rel,
                 section_index,
+                relocation_field_offset == PERSONALITY_FIELD_OFFSET,
                 resources,
                 queue,
                 scope,
             )?;
 
             // TODO: add validation for present __text, and __gcc_except_tab relocations
-            let address = info.r_address as usize;
+
             let entry = entries
                 .get_mut(address / ENTRY_LEN)
                 .context("missing unwind info entry for a relocation")?;
 
-            match address % ENTRY_LEN {
+            match relocation_field_offset {
                 START_FIELD_OFFSET => {
                     entry.start_relocation = Some(info);
                 }
@@ -2546,6 +2568,7 @@ fn process_relocation<'data, 'scope, A: platform::Arch<Platform = MachO>>(
     common: &mut CommonGroupState<'data, MachO>,
     rel: &Relocation,
     section_index: object::SectionIndex,
+    is_unwind_personality: bool,
     resources: &'scope layout::GraphResources<'data, '_, MachO>,
     queue: &mut layout::LocalWorkQueue<MachO>,
     scope: &rayon::Scope<'scope>,
@@ -2577,10 +2600,20 @@ fn process_relocation<'data, 'scope, A: platform::Arch<Platform = MachO>>(
         } else {
             A::relocation_from_raw(rel_info)?
         };
-        let mut flags_to_add = layout::resolution_flags(relocation.kind);
-        if is_dynamic_library(&symbol_db.file(symbol_db.file_id_for_symbol(symbol_id)))
-            && rel_info.r_type == object::macho::ARM64_RELOC_BRANCH26
-        {
+        let from_dynamic_lib =
+            is_dynamic_library(&symbol_db.file(symbol_db.file_id_for_symbol(symbol_id)));
+        let mut flags_to_add = if is_unwind_personality {
+            // The input pointer is consumed, not copied to the output. __unwind_info
+            // refers indirectly to the personality through a GOT slot instead.
+            ensure!(
+                from_dynamic_lib,
+                "locally defined compact-unwind personalities are not yet supported"
+            );
+            ValueFlags::GOT
+        } else {
+            layout::resolution_flags(relocation.kind)
+        };
+        if from_dynamic_lib && rel_info.r_type == object::macho::ARM64_RELOC_BRANCH26 {
             // TODO: classify symbols more reliably, likely by checking whether their section is
             // __text.
             flags_to_add |= ValueFlags::GOT | ValueFlags::DYNAMIC_FUNCTION | ValueFlags::PLT;
@@ -2589,7 +2622,8 @@ fn process_relocation<'data, 'scope, A: platform::Arch<Platform = MachO>>(
         let atomic_flags = &resources.per_symbol_flags.get_atomic(symbol_id);
         let previous_flags = atomic_flags.fetch_or(flags_to_add);
 
-        if is_dynamic_library(&symbol_db.file(symbol_db.file_id_for_symbol(symbol_id)))
+        if !is_unwind_personality
+            && is_dynamic_library(&symbol_db.file(symbol_db.file_id_for_symbol(symbol_id)))
             && relocation.kind == RelocationKind::Absolute
             && relocation.size == RelocationSize::ByteSize(8)
         {
