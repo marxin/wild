@@ -118,15 +118,14 @@ fn encode_personality_fn_index(encoding: u32, personality_idx: usize) -> u32 {
 }
 
 pub(crate) fn output_size(unwind_info_entries: &[UnwindInfoWithRelocs]) -> Result<u64> {
-    let personalities_to_idx: HashMap<SymbolId, usize> = HashMap::from_iter(
-        unwind_info_entries
-            .iter()
-            .filter_map(|entry| entry.personality_symbol_id)
-            .unique()
-            .sorted()
-            .enumerate()
-            .map(|(i, p)| (p, i)),
-    );
+    let personalities_to_idx: HashMap<SymbolId, usize> = unwind_info_entries
+        .iter()
+        .filter_map(|entry| entry.personality_symbol_id)
+        .unique()
+        .sorted()
+        .enumerate()
+        .map(|(i, p)| (p, i))
+        .collect();
     ensure!(
         personalities_to_idx.len() <= PERSONALITY_COUNT_LIMIT,
         "too many personality functions in the compact unwind: {PERSONALITY_COUNT_LIMIT}"
@@ -196,12 +195,11 @@ pub(crate) fn build(
         .sorted()
         .unique()
         .collect_vec();
-    let personalities_to_idx: HashMap<SymbolId, usize> = HashMap::from_iter(
-        personalities
-            .iter()
-            .enumerate()
-            .map(|(i, (symbol_id, _))| (*symbol_id, i)),
-    );
+    let personalities_to_idx: HashMap<SymbolId, usize> = personalities
+        .iter()
+        .enumerate()
+        .map(|(i, (symbol_id, _))| (*symbol_id, i))
+        .collect();
 
     let unwind_info_entries = unwind_info_entries
         .iter()
@@ -236,12 +234,11 @@ pub(crate) fn build(
         })
         .unique()
         .collect_vec();
-    let encoding_to_index: HashMap<u32, usize> = HashMap::from_iter(
-        encoding_values
-            .iter()
-            .enumerate()
-            .map(|(i, encoding)| (*encoding, i)),
-    );
+    let encoding_to_index: HashMap<u32, usize> = encoding_values
+        .iter()
+        .enumerate()
+        .map(|(i, encoding)| (*encoding, i))
+        .collect();
 
     let compressed_pages = unwind_info_entries
         .len()
