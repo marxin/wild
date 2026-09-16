@@ -14,7 +14,7 @@ use zerocopy::IntoBytes;
 
 // TODO: Copied from `macho-unwind-info` crate and we should upstream it in `object` crate
 
-// Based on an excelent blog post that discusses the data format:
+// Based on an excellent blog post that discusses the data format:
 // https://gankra.github.io/blah/compact-unwinding/
 
 /// The `__unwind_info` header.
@@ -106,7 +106,7 @@ pub struct LsdaEntry {
 }
 
 const COMPRESSED_PAGE_SIZE: usize = 4096;
-const COMPRESED_PAGE_ENTRIES_COUNT: usize =
+const COMPRESSED_PAGE_ENTRIES_COUNT: usize =
     (COMPRESSED_PAGE_SIZE - size_of::<CompressedPage>()) / size_of::<u32>();
 const UNWIND_SECOND_LEVEL_COMPRESSED: u32 = 3;
 // 2-bits using one-based index
@@ -160,7 +160,7 @@ pub(crate) fn output_size(unwind_info_entries: &[UnwindInfoWithRelocs]) -> Resul
 
     let compressed_pages = unwind_info_entries
         .len()
-        .div_ceil(COMPRESED_PAGE_ENTRIES_COUNT);
+        .div_ceil(COMPRESSED_PAGE_ENTRIES_COUNT);
     let compressed_pages_total_size = compressed_pages * size_of::<CompressedPage>()
         + unwind_info_entries.len() * size_of::<u32>();
     // PageEntry:CompressedPage mapping is 1:1 (modulo we need one more for the termination page)
@@ -242,7 +242,7 @@ pub(crate) fn build(
 
     let compressed_pages = unwind_info_entries
         .len()
-        .div_ceil(COMPRESED_PAGE_ENTRIES_COUNT);
+        .div_ceil(COMPRESSED_PAGE_ENTRIES_COUNT);
 
     let mut out = Vec::with_capacity(section_size);
 
@@ -273,7 +273,7 @@ pub(crate) fn build(
 
     // We build the second-level pages first.
     let second_level_entries = unwind_info_entries
-        .chunks(COMPRESED_PAGE_ENTRIES_COUNT)
+        .chunks(COMPRESSED_PAGE_ENTRIES_COUNT)
         .map(|chunk| {
             let start = chunk.first().unwrap().start_address;
             let encoding_array = chunk
