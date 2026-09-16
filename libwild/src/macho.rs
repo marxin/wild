@@ -4,8 +4,10 @@ use crate::alignment;
 use crate::alignment::Alignment;
 use crate::alignment::MACHO_PAGE_ALIGNMENT;
 use crate::args::macho::MachOArgs;
+use crate::bail;
 use crate::ensure;
 use crate::error;
+use crate::error::Context;
 use crate::error::Result;
 use crate::file_kind::FileKind;
 use crate::file_writer::copy_section_data;
@@ -50,7 +52,6 @@ use crate::symbol_db::SymbolId;
 use crate::symbol_db::Visibility;
 use crate::value_flags::ValueFlags;
 use crate::verbose_timing_phase;
-use anyhow::Context;
 use itertools::Itertools;
 use object::Endianness;
 use object::SymbolIndex;
@@ -60,6 +61,7 @@ use object::macho::N_EXT;
 use object::macho::N_PEXT;
 use object::macho::N_SECT;
 use object::macho::N_WEAK_DEF;
+use object::macho::RelocationInfo;
 use object::macho::S_ATTR_EXT_RELOC;
 use object::macho::S_ATTR_LOC_RELOC;
 use object::macho::S_ATTR_PURE_INSTRUCTIONS;
@@ -78,9 +80,11 @@ use object::read::macho::Nlist;
 use object::read::macho::Section;
 use object::read::macho::Segment;
 use std::borrow::Cow;
+use std::mem::offset_of;
 use std::num::NonZeroU8;
 use std::num::NonZeroU64;
 use std::slice::Iter;
+use zerocopy::FromBytes;
 
 #[derive(Debug, Copy, Clone, Default)]
 pub(crate) struct MachO;
@@ -111,6 +115,7 @@ enum SinglePartSectionId {
     ChainedFixupTable,
     ExportsTrie,
     InitOffsets,
+    UnwindInfo,
 
     // Must be last.
     Count,
@@ -129,6 +134,7 @@ pub(crate) mod part_id {
     pub(crate) const CHAINED_FIXUP_TABLE: PartId = SinglePartSectionId::ChainedFixupTable.part_id();
     pub(crate) const EXPORTS_TRIE: PartId = SinglePartSectionId::ExportsTrie.part_id();
     pub(crate) const INIT_OFFSETS: PartId = SinglePartSectionId::InitOffsets.part_id();
+    pub(crate) const COMPACT_UNWIND: PartId = SinglePartSectionId::UnwindInfo.part_id();
 }
 
 pub(crate) mod output_section_id {
@@ -152,6 +158,8 @@ pub(crate) mod output_section_id {
         SinglePartSectionId::ExportsTrie.output_section_id();
     pub(crate) const INIT_OFFSETS: OutputSectionId =
         SinglePartSectionId::InitOffsets.output_section_id();
+    pub(crate) const UNWIND_INFO: OutputSectionId =
+        SinglePartSectionId::UnwindInfo.output_section_id();
 }
 
 const LE: Endianness = Endianness::Little;
@@ -165,6 +173,11 @@ pub(crate) const MACHO_COMMAND_ALIGNMENT: usize = 8;
 
 /// A path to the default dynamic linker.
 pub(crate) const DYLINKER_PATH: &[u8] = b"/usr/lib/dyld";
+
+/// Section names
+pub const GCC_EXCEPT_TAB_SECTION_NAME: &str = "__gcc_except_tab";
+pub const UNWIND_INFO_SECTION_NAME: &str = "__unwind_info";
+pub const COMPACT_UNWIND_SECTION_NAME: &str = "__compact_unwind";
 
 // TODO: Getting the number of active segments in epilogue depends on determine_header_size
 // which is called later for the prologue. We potentially over-allocate a couple of bytes.
@@ -230,6 +243,45 @@ pub(crate) fn load_dylib_command_size(path: &[u8]) -> usize {
     (size_of::<DylibCommand>() + path.len() + 1).next_multiple_of(MACHO_COMMAND_ALIGNMENT)
 }
 
+// TODO: promote to object crate
+
+#[derive(FromBytes, Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct UnwindInfoEntry {
+    pub(crate) start: u64,
+    pub(crate) length: u32,
+    pub(crate) encoding: u32,
+    pub(crate) personality: u64,
+    pub(crate) lsda: u64,
+}
+
+pub(crate) const START_FIELD_OFFSET: usize = offset_of!(UnwindInfoEntry, start);
+pub(crate) const PERSONALITY_FIELD_OFFSET: usize = offset_of!(UnwindInfoEntry, personality);
+pub(crate) const LSDA_FIELD_OFFSET: usize = offset_of!(UnwindInfoEntry, lsda);
+
+#[derive(Debug, Clone)]
+pub(crate) struct UnwindInfoWithRelocs {
+    pub(crate) entry: UnwindInfoEntry,
+    pub(crate) start_relocation: Option<RelocationInfo>,
+    pub(crate) personality_relocation: Option<RelocationInfo>,
+    // Definition of the personality symbol used for getting the function index
+    // that's added to the `encoding`.
+    pub(crate) personality_symbol_id: Option<SymbolId>,
+    pub(crate) lsda_relocation: Option<RelocationInfo>,
+    pub(crate) file_id: FileId,
+}
+
+#[derive(Debug)]
+pub(crate) struct ResolvedUnwindInfo {
+    pub(crate) entry: UnwindInfoEntry,
+    pub(crate) start_address: u64,
+    pub(crate) personality_address: Option<u64>,
+    // Definition of the personality symbol used for getting the function index
+    // that's added to the `encoding`.
+    pub(crate) personality_symbol_id: Option<SymbolId>,
+    pub(crate) lsda_address: Option<u64>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct SegmentName([u8; 16]);
 
@@ -270,6 +322,7 @@ pub(crate) struct LayoutExt {
     pub(crate) imported_symbols: Vec<ImportedSymbolWithResolution>,
     /// Final addresses of initializer functions, in input relocation order.
     pub(crate) init_function_addresses: Vec<u64>,
+    pub(crate) unwind_info_entries: Vec<UnwindInfoWithRelocs>,
 }
 
 #[derive(Debug, Default)]
@@ -277,11 +330,13 @@ pub(crate) struct FinaliseSizesExt {
     imported_libraries: Vec<FileId>,
     imported_symbols: Vec<SymbolId>,
     init_functions: Vec<SymbolId>,
+    unwind_info_entries: Vec<UnwindInfoWithRelocs>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct ObjectLayoutStateExt {
     init_functions: Vec<SymbolId>,
+    unwind_info_entries: Vec<UnwindInfoWithRelocs>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -425,8 +480,12 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
             .ok_or(error!("section index out of range"))
     }
 
-    fn section_by_name(&self, _name: &str) -> Option<(object::SectionIndex, &SectionHeader)> {
-        todo!()
+    fn section_by_name(&self, name: &str) -> Option<(object::SectionIndex, &SectionHeader)> {
+        self.sections()
+            .iter()
+            .enumerate()
+            .find(|(_, section)| section.name() == name.as_bytes())
+            .map(|(index, section)| (object::SectionIndex(index), section))
     }
 
     fn symbol_section(
@@ -626,7 +685,8 @@ impl platform::SectionHeader for SectionHeader {
     fn should_exclude(&self) -> bool {
         // TODO: We need support for sections backed by the Mach-O indirect symbol table for dynamic
         // linking.
-        self.flags.get(LE).intersects(macho::S_ATTR_DEBUG)
+        (self.flags.get(LE).intersects(macho::S_ATTR_DEBUG)
+            && self.name() != COMPACT_UNWIND_SECTION_NAME.as_bytes())
             || matches!(
                 SegmentName::from_bytes(self.segment_name()),
                 SegmentName::PAGEZERO | SegmentName::LINKEDIT | SegmentName::LLVM
@@ -1049,6 +1109,7 @@ impl platform::Platform for MachO {
         output_section_id::CHAINED_FIXUP_TABLE,
         output_section_id::EXPORTS_TRIE,
         output_section_id::CODE_SIGNATURE,
+        output_section_id::UNWIND_INFO,
     ];
 
     type File<'data> = File<'data>;
@@ -1371,6 +1432,7 @@ impl platform::Platform for MachO {
         let mut imported_libraries = Vec::new();
         let mut imported_symbols = Vec::new();
         let mut init_functions = Vec::new();
+        let mut unwind_info_entries = Vec::new();
 
         for group in groups {
             for file in &group.files {
@@ -1383,6 +1445,8 @@ impl platform::Platform for MachO {
                                 .iter()
                                 .map(|local_symbol_id| symbol_db.definition(*local_symbol_id)),
                         );
+                        unwind_info_entries
+                            .extend(state.format_specific.unwind_info_entries.iter().cloned());
                     }
                     layout::FileLayoutState::StubLibrary(state) => {
                         if state.format_specific.loaded {
@@ -1407,6 +1471,7 @@ impl platform::Platform for MachO {
             imported_libraries,
             imported_symbols,
             init_functions,
+            unwind_info_entries,
         })
     }
 
@@ -1453,6 +1518,7 @@ impl platform::Platform for MachO {
                     })
             })
             .collect::<Result<Vec<_>>>()?;
+        layout_ext.unwind_info_entries = finalise_sizes_ext.unwind_info_entries;
 
         Ok(layout_ext)
     }
@@ -1503,6 +1569,98 @@ impl platform::Platform for MachO {
             );
             process_relocation::<A>(object, rel, section_index, resources, queue, scope)?;
         }
+
+        Ok(())
+    }
+
+    fn process_compact_unwind_section<'data, 'scope, A: platform::Arch<Platform = Self>>(
+        object: &mut crate::layout::ObjectLayoutState<'data, Self>,
+        _common: &mut crate::layout::CommonGroupState<'data, Self>,
+        section_index: object::SectionIndex,
+        resources: &'scope crate::layout::GraphResources<'data, '_, Self>,
+        queue: &mut crate::layout::LocalWorkQueue<Self>,
+        scope: &rayon::Scope<'scope>,
+    ) -> Result {
+        const ENTRY_LEN: usize = size_of::<UnwindInfoEntry>();
+
+        let header = object.object.section(section_index)?;
+        let data = header
+            .data(LE, object.object.data, u64::from(header.offset(LE)))
+            .context("cannot read compact unwind section data")?;
+        let gcc_except_table_section = object
+            .object
+            .section_by_name(GCC_EXCEPT_TAB_SECTION_NAME)
+            .map(|(section_index, _)| {
+                object
+                    .object
+                    .section(section_index)
+                    .with_context(|| format!("cannot read {GCC_EXCEPT_TAB_SECTION_NAME} section"))
+            })
+            .transpose()?;
+
+        let chunks = data.as_chunks::<ENTRY_LEN>();
+        ensure!(
+            chunks.1.is_empty(),
+            "compact unwind info has an invalid size"
+        );
+
+        let file_id = object.file_id;
+        let mut entries = chunks
+            .0
+            .iter()
+            .map(|chunk| UnwindInfoWithRelocs {
+                entry: UnwindInfoEntry::read_from_bytes(chunk).unwrap(),
+                start_relocation: None,
+                personality_relocation: None,
+                personality_symbol_id: None,
+                lsda_relocation: None,
+                file_id,
+            })
+            .collect_vec();
+
+        for rel in object.relocations(section_index)?.relocations {
+            let info = rel.info(LE);
+            ensure!(
+                !info.r_pcrel && info.r_length == 3 && info.r_type == macho::ARM64_RELOC_UNSIGNED,
+                "unsupported Mach-O compact unwind relocation"
+            );
+
+            let classified_relocation =
+                process_relocation::<A>(object, rel, section_index, resources, queue, scope)?;
+
+            // TODO: add validation for present __text, and __gcc_except_tab relocations
+            let address = info.r_address as usize;
+            let entry = entries
+                .get_mut(address / ENTRY_LEN)
+                .context("missing unwind info entry for a relocation")?;
+
+            match address % ENTRY_LEN {
+                START_FIELD_OFFSET => {
+                    entry.start_relocation = Some(info);
+                }
+                PERSONALITY_FIELD_OFFSET => {
+                    ensure!(info.r_extern, "personality symbol missing in relocation");
+                    entry.personality_relocation = Some(info);
+                    let Some(resolution) = classified_relocation else {
+                        bail!("missing personality symbol resolution");
+                    };
+                    entry.personality_symbol_id = Some(resolution.symbol_id);
+                }
+                LSDA_FIELD_OFFSET => {
+                    entry.lsda_relocation = Some(info);
+                    // TODO
+                    let Some(gcc_except_table_addr) =
+                        gcc_except_table_section.map(|s| s.addr.get(LE))
+                    else {
+                        bail!("missing {GCC_EXCEPT_TAB_SECTION_NAME} section")
+                    };
+                    entry.entry.lsda -= gcc_except_table_addr;
+                }
+                _ => bail!("unexpected relocation offset for a compact unwind section"),
+            }
+        }
+
+        object.format_specific.unwind_info_entries.extend(entries);
 
         Ok(())
     }
@@ -1566,7 +1724,7 @@ impl platform::Platform for MachO {
         dynamic_symbol_definitions: &[crate::layout::DynamicSymbolDefinition<'data, Self>],
         format_specific: &Self::FinaliseSizesExt<'data>,
         symbol_db: &crate::symbol_db::SymbolDb<'data, Self>,
-    ) {
+    ) -> Result<()> {
         let mut fixup_table_size = CHAINED_FIXUP_TABLE_BASE_SIZE;
 
         fixup_table_size += state
@@ -1609,11 +1767,16 @@ impl platform::Platform for MachO {
             part_id::EXPORTS_TRIE,
             crate::trie::build(&mut exports).len() as u64,
         );
-
         mem_sizes.increment(
             part_id::INIT_OFFSETS,
             format_specific.init_functions.len() as u64 * INIT_OFFSET_ENTRY_SIZE,
         );
+        mem_sizes.increment(
+            part_id::COMPACT_UNWIND,
+            crate::compact_unwind::output_size(&format_specific.unwind_info_entries)?,
+        );
+
+        Ok(())
     }
 
     fn finalise_sizes_all<'data>(
@@ -1931,6 +2094,7 @@ impl platform::Platform for MachO {
             SegmentName::TEXT,
         );
         builder.add_section(output_section_id::INIT_OFFSETS);
+        builder.add_section(output_section_id::UNWIND_INFO);
 
         builder.add_section(output_section_id::PLT_GOT);
         add_sections_in_segment(&mut builder, output_sections, &custom.ro, SegmentName::TEXT);
@@ -2166,6 +2330,14 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
         section_flags: macho::S_INIT_FUNC_OFFSETS.to_flags(),
         min_alignment: Alignment { exponent: 2 },
     };
+    defs[output_section_id::UNWIND_INFO.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionIdentity::new(
+            SectionName(UNWIND_INFO_SECTION_NAME.as_bytes()),
+            Some(SegmentName::TEXT),
+        )),
+        min_alignment: Alignment { exponent: 2 },
+        ..DEFAULT_DEFS
+    };
 
     defs
 };
@@ -2206,7 +2378,10 @@ fn allocate_plt(memory_offsets: &mut OutputSectionPartMap<u64>) -> NonZeroU64 {
 
 const DEFAULT_SECTION_RULES: &[SectionRule<'static>] = &[
     SectionRule::exact(b"__mod_init_func", SectionRuleOutcome::InitFunc),
-    // TODO: Add a Mach-O output section ID and rule for `__compact_unwind`.
+    SectionRule::exact(
+        COMPACT_UNWIND_SECTION_NAME.as_bytes(),
+        SectionRuleOutcome::CompactUnwind,
+    ),
 ];
 
 fn section_header_name_for_segment<'data>(
@@ -2291,6 +2466,11 @@ fn add_sections_in_segment<'data>(
     }
 }
 
+#[derive(Debug)]
+struct ClassifiedSymbolRelocation {
+    symbol_id: SymbolId,
+}
+
 #[inline(always)]
 fn process_relocation<'data, 'scope, A: platform::Arch<Platform = MachO>>(
     object: &layout::ObjectLayoutState<'data, MachO>,
@@ -2299,7 +2479,7 @@ fn process_relocation<'data, 'scope, A: platform::Arch<Platform = MachO>>(
     resources: &'scope layout::GraphResources<'data, '_, MachO>,
     queue: &mut layout::LocalWorkQueue<MachO>,
     scope: &rayon::Scope<'scope>,
-) -> Result {
+) -> Result<Option<ClassifiedSymbolRelocation>> {
     let rel_info = rel.info(LE);
     // r_extern == true if the reference points to a symbol
     if rel_info.r_extern {
@@ -2337,9 +2517,11 @@ fn process_relocation<'data, 'scope, A: platform::Arch<Platform = MachO>>(
         if !previous_flags.has_resolution() {
             queue.send_symbol_request::<A>(symbol_id, resources, scope);
         }
-    }
 
-    Ok(())
+        Ok(Some(ClassifiedSymbolRelocation { symbol_id }))
+    } else {
+        Ok(None)
+    }
 }
 
 fn is_dynamic_library(file: &SequencedInput<MachO>) -> bool {
