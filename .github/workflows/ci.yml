@@ -152,7 +152,7 @@ jobs:
         with:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2.87.3
+      - uses: taiki-e/install-action@v2.87.8
         with:
           tool: wasm-tools
       - name: Setup Wasmtime
@@ -168,7 +168,9 @@ jobs:
     env:
       WILD_TEST_IGNORE_FORMAT: "1" # Checked by other jobs
     steps:
-      - run: brew install lld
+      - run: brew install lld llvm
+      - run: echo "PATH=/opt/homebrew/opt/llvm/bin:$PATH" >> $GITHUB_ENV
+      - run: clang --version
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -205,7 +207,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         id: rust-toolchain
-      - uses: taiki-e/install-action@v2.87.3
+      - uses: taiki-e/install-action@v2.87.8
         with:
           tool: cargo-hack,cargo-minimal-versions,taplo
       - uses: Swatinem/rust-cache@v2

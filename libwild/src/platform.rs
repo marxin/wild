@@ -178,6 +178,14 @@ pub(crate) trait Arch: Send + Sync + 'static {
         unreachable!();
     }
 
+    /// Input symbols that `collect_relaxation_deltas` may resolve for this section.
+    fn collect_relaxation_referenced_symbols<'data>(
+        _relocations: <Self::Platform as Platform>::RelocationList<'data>,
+        _existing_deltas: Option<&SectionRelaxDeltas>,
+    ) -> Vec<object::SymbolIndex> {
+        Vec::new()
+    }
+
     fn is_symbol_variant_pcs(
         _object: &<Self::Platform as Platform>::File<'_>,
         _symbol_index: object::SymbolIndex,
@@ -317,6 +325,7 @@ pub(crate) trait Platform:
     const INTERP_SECTION_ID: Option<OutputSectionId> = None;
     const SFRAME_SECTION_ID: Option<OutputSectionId> = None;
     const RELRO_PADDING_SECTION_ID: Option<OutputSectionId> = None;
+    const PARTIAL_SINGLETONS_ID: Option<OutputSectionId> = None;
 
     const CUSTOM_PHDR_EXCLUDED_SECTION_IDS: &'static [OutputSectionId] = &[];
     const PACKED_SECTION_IDS: &'static [OutputSectionId] = &[];
@@ -665,6 +674,7 @@ pub(crate) trait Platform:
     fn create_layout_ext<'data>(
         finalise_sizes_ext: Self::FinaliseSizesExt<'data>,
         _resolutions: &SymbolResolutions<Self>,
+        _group_layouts: &[layout::GroupLayout<'data, Self>],
     ) -> Result<Self::LayoutExt<'data>>;
 
     fn load_exception_frame_data<'data, 'scope, A: Arch<Platform = Self>>(
@@ -1576,6 +1586,10 @@ pub(crate) trait Args: std::fmt::Debug + Send + Sync + 'static {
 
     fn rosegment(&self) -> bool {
         true
+    }
+
+    fn image_base(&self) -> Option<u64> {
+        None
     }
 
     fn should_emit_got_plt_syms(&self) -> bool {

@@ -37,7 +37,6 @@ use crate::macho::DylibCommand;
 use crate::macho::DylinkerCommand;
 use crate::macho::EntryPointCommand;
 use crate::macho::FileHeader;
-use crate::macho::GOT_ENTRY_SIZE;
 use crate::macho::MACHO_COMMAND_ALIGNMENT;
 use crate::macho::MACHO_START_MEM_ADDRESS;
 use crate::macho::MAX_SEGMENT_COUNT;
@@ -67,6 +66,7 @@ use crate::platform::Arch;
 use crate::platform::Args;
 use crate::platform::ObjectFile;
 use crate::platform::Relaxation;
+use crate::platform::SectionAttributes;
 use crate::platform::Symbol;
 use crate::resolution::SectionSlot;
 use crate::symbol_db::SymbolId;
@@ -74,6 +74,7 @@ use crate::timing_phase;
 use crate::value_flags::ValueFlags;
 use crate::verbose_timing_phase;
 use itertools::Itertools;
+use linker_utils::bit_misc::BitExtraction;
 use linker_utils::elf::RelocationKind;
 use linker_utils::utils::slice_from_all_bytes_mut;
 use object::BigEndian;
@@ -168,8 +169,8 @@ pub(crate) fn write<'data, A: Arch<Platform = MachO>>(
         })?;
 
     let mut section_buffers = split_output_into_sections(layout, &mut sized_output.out).0;
-    write_got_entries(layout, section_buffers.get_mut(output_section_id::GOT))?;
     write_plt_entries::<A>(layout, section_buffers.get_mut(output_section_id::PLT_GOT))?;
+    write_chained_fixups(layout, &mut sized_output.out)?;
 
     write_code_signature_metadata(layout, sized_output)?;
     write_uuid(layout, sized_output)?;
@@ -457,38 +458,6 @@ fn exported_symbol_is_weak(layout: &MachOLayout<'_>, symbol_id: SymbolId) -> Res
     Ok(object.object.symbol(symbol_index)?.is_weak())
 }
 
-fn write_got_entries(layout: &MachOLayout<'_>, got: &mut [u8]) -> Result {
-    let got_layout = layout.section_layouts.get(output_section_id::GOT);
-
-    let sorted_symbols = &layout.format_specific.imported_symbols;
-    for (i, imported_symbol) in sorted_symbols.iter().enumerate() {
-        let offset = imported_symbol
-            .got_address
-            .get()
-            .checked_sub(got_layout.mem_offset)
-            .ok_or_else(|| error!("GOT entry address is before __got"))?
-            as usize;
-        let end = offset + GOT_ENTRY_SIZE as usize;
-
-        /* DYLD_CHAINED_PTR_64 format:
-        uint64_t dyld_chained_ptr_64_bind:
-          ordinal: 24
-          addend: 8 // 0 thru 255
-          reserved: 19 // all zeros
-          next: 12 // 4-byte stride
-          bind: 1 // == 1
-        */
-        let bind = 1u64 << 63;
-        // TODO: when crossing a page boundary, next is equal to zero
-        let next = if i == sorted_symbols.len() - 1 { 0 } else { 2 };
-        let next = next << 51;
-        let ordinal = i as u64;
-        got[offset..end].copy_from_slice(&(bind | next | ordinal).to_le_bytes());
-    }
-
-    Ok(())
-}
-
 fn write_plt_entries<A: Arch<Platform = MachO>>(
     layout: &MachOLayout<'_>,
     plt: &mut [u8],
@@ -507,14 +476,75 @@ fn write_plt_entries<A: Arch<Platform = MachO>>(
             as usize;
         let end = offset + PLT_ENTRY_SIZE as usize;
 
-        A::write_plt_entry(
-            &mut plt[offset..end],
-            imported_symbol.got_address.get(),
-            stub_address.get(),
-        )?;
+        let got_address = imported_symbol
+            .got_address
+            .ok_or("PLT entries must have corresponding GOT entries")?
+            .get();
+
+        A::write_plt_entry(&mut plt[offset..end], got_address, stub_address.get())?;
     }
 
     Ok(())
+}
+
+fn write_chained_fixups(layout: &MachOLayout<'_>, out: &mut [u8]) -> Result {
+    let mut fixups = layout.format_specific.fixups.iter().peekable();
+
+    for segment in &layout.segment_layouts.segments {
+        let segment_addresses =
+            segment.sizes.mem_offset..segment.sizes.mem_offset + segment.sizes.mem_size;
+
+        while let Some(fixup) =
+            fixups.next_if(|fixup| segment_addresses.contains(&fixup.fixup_address))
+        {
+            let offset_in_segment = fixup.fixup_address - segment.sizes.mem_offset;
+            let file_offset = segment.sizes.file_offset + usize::try_from(offset_in_segment)?;
+            let page_index = offset_in_segment / MACHO_PAGE_ALIGNMENT.value();
+
+            let next_fixup = fixups
+                .peek()
+                .filter(|next| segment_addresses.contains(&next.fixup_address));
+            let next_offset_in_segment =
+                next_fixup.map(|fixup| fixup.fixup_address - segment.sizes.mem_offset);
+            let next = match next_offset_in_segment {
+                Some(next_offset) if next_offset / MACHO_PAGE_ALIGNMENT.value() == page_index => {
+                    let distance = next_offset - offset_in_segment;
+                    // TODO: Support layouts that don't support divisibility by the four byte
+                    // chained fixup stride (e.g. manual assembly or packed
+                    // structs).
+                    ensure!(
+                        distance % 4 == 0,
+                        "Fixup distances need to be divisible by 4"
+                    );
+                    distance / 4
+                }
+                _ => 0,
+            };
+
+            let encoding = write_bind_encoding(fixup.ordinal, next);
+            out[file_offset..file_offset + encoding.len()].copy_from_slice(&encoding);
+        }
+    }
+
+    ensure!(
+        fixups.next().is_none(),
+        "Fixups are out of bounds for any segment"
+    );
+    Ok(())
+}
+
+fn write_bind_encoding(ordinal: u64, next: u64) -> [u8; 8] {
+    /* DYLD_CHAINED_PTR_64 format:
+    uint64_t dyld_chained_ptr_64_bind:
+      ordinal: 24
+      addend: 8 // 0 thru 255
+      reserved: 19 // all zeros
+      next: 12 // 4-byte stride
+      bind: 1 // == 1
+    */
+    let bind = 1u64 << 63;
+    let next = next << 51;
+    (bind | next | ordinal).to_le_bytes()
 }
 
 fn populate_file_header(
@@ -534,10 +564,17 @@ fn populate_file_header(
     header
         .sizeofcmds
         .set(LE, load_commands_info.file_size as u32);
-    header.flags.set(
-        LE,
-        macho::MH_PIE | macho::MH_DYLDLINK | macho::MH_NOUNDEFS | macho::MH_TWOLEVEL,
-    );
+
+    let mut flags = macho::MH_PIE | macho::MH_DYLDLINK | macho::MH_NOUNDEFS | macho::MH_TWOLEVEL;
+    let has_tlv_descriptors = layout.output_sections.ids_with_info().any(|(id, info)| {
+        layout.output_sections.will_emit_section(id)
+            && info.section_attributes.ty() == S_THREAD_LOCAL_VARIABLES
+    });
+    if has_tlv_descriptors {
+        flags |= macho::MH_HAS_TLV_DESCRIPTORS;
+    }
+
+    header.flags.set(LE, flags);
     header.reserved.set(LE, 0);
 }
 
@@ -705,15 +742,19 @@ fn write_object_section<'data, A: Arch<Platform = MachO>>(
 
     let section_flags = object_layout.object.section(section_index)?.flags.get(LE);
 
+    let mut previous = None;
     for rel in object_layout.relocations(section_index)?.relocations {
+        let rel_info = rel.info(LE);
         apply_relocation::<A>(
             object_layout,
             section_address,
             section_flags,
-            rel.info(LE),
+            rel_info,
             layout,
             out,
+            previous,
         )?;
+        previous = Some(rel_info);
     }
 
     Ok(())
@@ -727,6 +768,7 @@ fn apply_relocation<'data, A: Arch<Platform = MachO>>(
     rel: RelocationInfo,
     layout: &MachOLayout<'data>,
     out: &mut [u8],
+    previous_rel: Option<RelocationInfo>,
 ) -> Result {
     let mut offset_in_section = u64::from(rel.r_address);
     let place = section_address + offset_in_section;
@@ -737,6 +779,11 @@ fn apply_relocation<'data, A: Arch<Platform = MachO>>(
         address_hex = %HexU64::new(place)
     )
     .entered();
+
+    let rel_info = A::relocation_from_raw(rel)?;
+    if matches!(rel_info.kind, RelocationKind::MachoAddition) {
+        return Ok(());
+    }
 
     let (resolution, _symbol_index, local_symbol_id) = get_resolution(rel, object_layout, layout)?;
     let flags = layout.flags_for_symbol(local_symbol_id);
@@ -768,8 +815,19 @@ fn apply_relocation<'data, A: Arch<Platform = MachO>>(
                 non-interposable symbols in executables"
             )
         }
-        None => A::relocation_from_raw(rel)?,
+        None => rel_info,
     };
+
+    let mut addend = 0;
+    if let Some(previous_rel) = previous_rel {
+        match A::relocation_from_raw(previous_rel)?.kind {
+            RelocationKind::MachoAddition => {
+                // lld treats the value as signed 24-bit integral type
+                addend = u64::from(previous_rel.r_symbolnum).sign_extend(23);
+            }
+            _ => {}
+        }
+    }
 
     let mask = get_page_mask(rel_info.mask);
     let value = match rel_info.kind {
@@ -778,23 +836,33 @@ fn apply_relocation<'data, A: Arch<Platform = MachO>>(
                 && flags.has_link_time_address()
                 && is_tlv_template_referent(layout, local_symbol_id) =>
         {
-            // TODO: Once addends are supported, remember to change this to S + A -
-            // tlv_data_start_address().
             resolution
                 .raw_value
+                .wrapping_add(addend)
                 .wrapping_sub(layout.tlv_data_start_address())
         }
-        RelocationKind::Absolute => resolution.raw_value.bitand(mask.symbol_plus_addend),
-        RelocationKind::AbsoluteLowPart => resolution.raw_value.bitand(mask.symbol_plus_addend),
+        RelocationKind::Absolute => resolution
+            .raw_value
+            .wrapping_add(addend)
+            .bitand(mask.symbol_plus_addend),
+        RelocationKind::AbsoluteLowPart => resolution
+            .raw_value
+            .wrapping_add(addend)
+            .bitand(mask.symbol_plus_addend),
         RelocationKind::Relative => resolution
             .raw_value
+            .wrapping_add(addend)
             .bitand(mask.symbol_plus_addend)
             .wrapping_sub(place.bitand(mask.place)),
         RelocationKind::GotRelative => resolution
             .raw_value
+            .wrapping_add(addend)
             .bitand(mask.symbol_plus_addend)
             .wrapping_sub(place.bitand(mask.place)),
-        RelocationKind::Got => resolution.raw_value.bitand(mask.symbol_plus_addend),
+        RelocationKind::Got => resolution
+            .raw_value
+            .wrapping_add(addend)
+            .bitand(mask.symbol_plus_addend),
         _ => todo!(),
     };
 
@@ -804,6 +872,7 @@ fn apply_relocation<'data, A: Arch<Platform = MachO>>(
             %rel_info.size,
             value,
             value_hex = %HexU64::new(value),
+            addend,
             symbol_name = %layout.symbol_db.symbol_name_for_display(local_symbol_id),
             "relocation applied");
 
@@ -1086,69 +1155,80 @@ fn write_chained_fixup_table(layout: &MachOLayout, chained_fixup_table: &mut [u8
     let starts_in_segment_len =
         size_of::<ChainedStartsInSegment>() + CHAINED_FIXUP_PAGE_START_SIZE as usize;
     let imports_len = size_of::<u32>() * symbols.len();
-
     let starts_offset = size_of::<ChainedFixupsHeader>();
-    let imports_offset = starts_offset + starts_in_image_len + starts_in_segment_len;
-    let symbols_offset = imports_offset + imports_len;
 
     let (header, rest) = from_bytes_mut::<ChainedFixupsHeader>(chained_fixup_table)
         .map_err(|_| error!("Invalid chained fixups header allocation"))?;
-    let (starts_in_image, rest) = slice_from_bytes_mut::<U32<Endianness>>(rest, segment_count + 1)
-        .map_err(|_| error!("Invalid chained fixups starts allocation"))?;
+    let (starts_in_image, mut rest) =
+        slice_from_bytes_mut::<U32<Endianness>>(rest, segment_count + 1)
+            .map_err(|_| error!("Invalid chained fixups starts allocation"))?;
 
-    // 1) fill up ChainedFixupsHeader
+    // 1) fill up ChainedFixupsHeader. `imports_offset` and `symbols_offset` are written later once
+    //    we know how many DyldChainedStartsInSegment entries have been emitted
     header.fixups_version.set(LE, 0);
     header.starts_offset.set(LE, starts_offset as u32);
-    header.imports_offset.set(LE, imports_offset as u32);
-    header.symbols_offset.set(LE, symbols_offset as u32);
     header.imports_count.set(LE, symbols.len() as u32);
     header.imports_format.set(LE, DYLD_CHAINED_IMPORT);
     header.symbols_format.set(LE, 0);
 
     // 2) fill up dyld_chained_starts_in_image, which is `seg_count` (u32) followed by
-    //    `seg_info_offset` ([u32; seg_count]); only __DATA_CONST,__got segment is covered
+    //    `seg_info_offset` ([u32; seg_count])
     starts_in_image[0].set(LE, segment_count as u32);
     starts_in_image[1..].fill(U32::new(LE, 0));
 
-    // Early exit if we don't have any GOT entry to be encoded.
-    if layout.section_layouts.get(output_section_id::GOT).mem_size == 0 {
-        rest.zero();
-        return Ok(());
+    // 3) fill up DyldChainedStartsInSegment entries
+    let mut starts_in_segment_offset = starts_in_image_len;
+
+    for (i, segment) in active_segments.iter().enumerate() {
+        let segment_addresses =
+            segment.sizes.mem_offset..segment.sizes.mem_offset + segment.sizes.mem_size;
+
+        // TODO: For now, find the first fixup in a page for each segment. Once we support multiple
+        // pages, we should reimplement this so that we have a linear scan through fixups instead.
+        let Some(fixup) = layout
+            .format_specific
+            .fixups
+            .iter()
+            .find(|fixup| segment_addresses.contains(&fixup.fixup_address))
+        else {
+            continue;
+        };
+
+        // Accounts for both seg_count and __PAGEZERO.
+        starts_in_image[i + 2].set(LE, u32::try_from(starts_in_segment_offset)?);
+        let starts_in_segment = take_mut::<ChainedStartsInSegment>(&mut rest)?;
+        let page_starts = take_mut::<U16<Endianness>>(&mut rest)?;
+
+        starts_in_segment.size.set(LE, starts_in_segment_len as u32);
+        starts_in_segment
+            .page_size
+            .set(LE, MACHO_PAGE_ALIGNMENT.value() as u16);
+        starts_in_segment
+            .pointer_format
+            .set(LE, DYLD_CHAINED_PTR_64_OFFSET);
+        starts_in_segment
+            .segment_offset
+            .set(LE, segment.sizes.mem_offset - MACHO_START_MEM_ADDRESS);
+        starts_in_segment.max_valid_pointer.set(LE, 0);
+        // TODO:
+        starts_in_segment.page_count.set(LE, 1);
+        page_starts.set(
+            LE,
+            u16::try_from(
+                (fixup.fixup_address - segment.sizes.mem_offset) % MACHO_PAGE_ALIGNMENT.value(),
+            )?,
+        );
+
+        starts_in_segment_offset += starts_in_segment_len;
     }
 
-    let (data_const_segment_index, data_const_segment) = active_segments
-        .iter()
-        .enumerate()
-        .find(|(_, segment)| {
-            layout.program_segments.segment_def(segment.id).name == SegmentName::DATA_CONST
-        })
-        .ok_or_else(|| error!("non-empty __got requires __DATA_CONST segment"))?;
+    let imports_offset = starts_offset + starts_in_segment_offset;
+    let symbols_offset = imports_offset + imports_len;
+    header.imports_offset.set(LE, imports_offset as u32);
+    header.symbols_offset.set(LE, symbols_offset as u32);
 
-    // Accounts for both seg_count and __PAGEZERO.
-    starts_in_image[data_const_segment_index + 2].set(LE, starts_in_image_len as u32);
-
-    let (starts_in_segment, rest) = from_bytes_mut::<ChainedStartsInSegment>(rest)
-        .map_err(|_| error!("Invalid chained fixups starts in segment allocation"))?;
-    let (page_starts, rest) = slice_from_bytes_mut::<U16<Endianness>>(rest, 1)
-        .map_err(|_| error!("Invalid chained fixups page starts allocation"))?;
     let (imports, string_pool) = slice_from_bytes_mut::<U32<Endianness>>(rest, symbols.len())
         .map_err(|_| error!("Invalid chained fixups imports allocation"))?;
-
-    // 3) fill up DyldChainedStartsInSegment for the __got section
-    starts_in_segment.size.set(LE, starts_in_segment_len as u32);
-    starts_in_segment
-        .page_size
-        .set(LE, MACHO_PAGE_ALIGNMENT.value() as u16);
-    starts_in_segment
-        .pointer_format
-        .set(LE, DYLD_CHAINED_PTR_64_OFFSET);
-    starts_in_segment
-        .segment_offset
-        .set(LE, data_const_segment.sizes.file_offset as u64);
-    starts_in_segment.max_valid_pointer.set(LE, 0);
-    // TODO:
-    starts_in_segment.page_count.set(LE, 1);
-    page_starts[0].set(LE, 0);
 
     // 4) fill up all imported symbols chunked by the pages
     // TODO: support more pages
@@ -1188,6 +1268,7 @@ fn write_chained_fixup_table(layout: &MachOLayout, chained_fixup_table: &mut [u8
 
         let lib_ordinal = dynamic.ordinal.get();
 
+        // TODO: support weak import handling
         imports[i].set(
             Endianness::Little,
             u32::from(lib_ordinal) | ((symbol_offsets[i] as u32) << 9),

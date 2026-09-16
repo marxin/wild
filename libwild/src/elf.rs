@@ -241,6 +241,7 @@ pub(crate) trait ElfClass: Copy + Default + Send + Sync + std::fmt::Debug + 'sta
     const NOTE_HEADER_SIZE: u64 = size_of::<NoteHeader<Self>>() as u64;
     const GNU_HASH_BLOOM_SIZE: u64 = Self::ADDRESS_SIZE;
     const PROGRAM_HEADER_ALIGNMENT: Alignment = Self::ADDRESS_ALIGNMENT;
+    const SECTION_HEADER_ALIGNMENT: Alignment = Self::ADDRESS_ALIGNMENT;
     const GOT_ENTRY_ALIGNMENT: Alignment = Self::ADDRESS_ALIGNMENT;
     const RELA_ENTRY_ALIGNMENT: Alignment = Self::ADDRESS_ALIGNMENT;
     const RELR_ENTRY_ALIGNMENT: Alignment = Self::ADDRESS_ALIGNMENT;
@@ -365,6 +366,7 @@ enum RegularSectionId {
     GccExceptTable,
     NoteAbiTag,
     DataRelRo,
+    PartialLinkingSingletons,
 
     // Must be last.
     Count,
@@ -483,6 +485,8 @@ pub(crate) mod output_section_id {
     pub(crate) const NOTE_ABI_TAG: OutputSectionId =
         RegularSectionId::NoteAbiTag.output_section_id();
     pub(crate) const DATA_REL_RO: OutputSectionId = RegularSectionId::DataRelRo.output_section_id();
+    pub(crate) const PARTIAL_LINKING_SINGLETONS: OutputSectionId =
+        RegularSectionId::PartialLinkingSingletons.output_section_id();
 }
 
 #[derive(derive_more::Debug)]
@@ -679,6 +683,8 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
     const SFRAME_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::SFRAME);
     const RELRO_PADDING_SECTION_ID: Option<OutputSectionId> =
         Some(output_section_id::RELRO_PADDING);
+    const PARTIAL_SINGLETONS_ID: Option<OutputSectionId> =
+        Some(output_section_id::PARTIAL_LINKING_SINGLETONS);
 
     const CUSTOM_PHDR_EXCLUDED_SECTION_IDS: &'static [OutputSectionId] = &[
         output_section_id::PROGRAM_HEADERS,
@@ -1505,6 +1511,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
     fn create_layout_ext<'data>(
         finalise_sizes_ext: Self::FinaliseSizesExt<'data>,
         _resolutions: &layout::SymbolResolutions<Self>,
+        _group_layouts: &[layout::GroupLayout<'data, Self>],
     ) -> Result<Self::LayoutExt<'data>> {
         Ok(finalise_sizes_ext)
     }
@@ -2407,15 +2414,18 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         _args: &Self::Args,
     ) {
         sizes.increment(crate::part_id::FILE_HEADER, u64::from(C::FILE_HEADER_SIZE));
+
         sizes.increment(
             part_id::PROGRAM_HEADERS,
             program_headers_size::<C>(header_info),
         );
+
         sizes.increment(
             part_id::SECTION_HEADERS,
             section_headers_size::<C>(header_info),
         );
-        prelude.format_specific.shstrtab_size = output_sections
+
+        let regular_strtab_size = output_sections
             .ids_with_info()
             .filter(|(id, _info)| output_sections.output_index_of_section(*id).is_some())
             .map(|(_id, info)| {
@@ -2426,6 +2436,10 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
                 }
             })
             .sum::<u64>();
+
+        prelude.format_specific.shstrtab_size =
+            regular_strtab_size + header_info.partial_link_section_name_bytes;
+
         sizes.increment(part_id::SHSTRTAB, prelude.format_specific.shstrtab_size);
     }
 
@@ -2497,7 +2511,6 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
 
         builder.add_section(crate::output_section_id::FILE_HEADER);
         builder.add_section(output_section_id::PROGRAM_HEADERS);
-        builder.add_section(output_section_id::SECTION_HEADERS);
         builder.add_section(output_section_id::NOTE_GNU_PROPERTY);
         builder.add_section(output_section_id::NOTE_GNU_BUILD_ID);
         builder.add_section(output_section_id::INTERP);
@@ -2551,6 +2564,8 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         builder.add_section(output_section_id::SYMTAB_LOCAL);
         builder.add_section(output_section_id::SYMTAB_SHNDX_LOCAL);
         builder.add_section(output_section_id::STRTAB);
+        builder.add_section(output_section_id::PARTIAL_LINKING_SINGLETONS);
+        builder.add_section(output_section_id::SECTION_HEADERS);
 
         builder.build()
     }
@@ -2762,7 +2777,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
                 while let Some((_, seg_id)) = it.next_if(|&(cat, _)| cat == 3) {
                     builder.push_event(OrderEvent::SegmentEnd(seg_id));
                 }
-                builder.push_event(OrderEvent::Section(output_section_id::SECTION_HEADERS));
+
                 for (_, seg_id) in it {
                     builder.push_event(OrderEvent::SegmentStart(seg_id));
                 }
@@ -2826,6 +2841,8 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         builder.push_event(OrderEvent::SegmentStart(riscv_segment));
         builder.add_section(output_section_id::RISCV_ATTRIBUTES);
         builder.push_event(OrderEvent::SegmentEnd(riscv_segment));
+
+        builder.add_section(output_section_id::SECTION_HEADERS);
 
         Ok(builder.build())
     }
@@ -4368,7 +4385,7 @@ impl LayoutExt {
         args: &ElfArgs,
     ) -> Result<Self> {
         let states = objects_iter(groups).map(|o| &o.format_specific);
-        let gnu_property_notes = merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa)?;
+        let gnu_property_notes = merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa);
         let riscv_attributes = merge_riscv_attributes::<C, A>(states)?;
         let eflags = merge_eflags::<C, A>(objects_iter(groups).map(|o| o.object))?;
         let has_eh_frame_input = objects_iter(groups).any(|o| o.format_specific.has_eh_frame_input);
@@ -4394,7 +4411,7 @@ impl LayoutExt {
 fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
     states: impl Iterator<Item = &'states ObjectLayoutStateExt<'data, C>>,
     isa_needed: Option<NonZeroU32>,
-) -> Result<Vec<GnuProperty>> {
+) -> Vec<GnuProperty> {
     timing_phase!("Merge GNU property notes");
 
     let properties_per_file = states.map(|state| &state.gnu_property_notes).collect_vec();
@@ -4408,8 +4425,9 @@ fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
         // First OR within file to accumulate all features this file has.
         let mut file_map: HashMap<_, (u32, PropertyClass)> = HashMap::new();
         for prop in *file_props {
-            let property_class = A::get_property_class(prop.ptype.0)
-                .ok_or_else(|| crate::error!("unclassified property type {}", prop.ptype))?;
+            let Some(property_class) = A::get_property_class(prop.ptype.0) else {
+                continue;
+            };
             file_map
                 .entry(prop.ptype)
                 .and_modify(|entry: &mut (u32, PropertyClass)| {
@@ -4441,7 +4459,8 @@ fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
     }
 
     // Iterate the properties sorted by property_type so that we have a stable output!
-    let output_properties = property_map
+
+    property_map
         .into_iter()
         .sorted_by_key(|x| x.0)
         .filter_map(|(property_type, (property_value, property_class))| {
@@ -4463,9 +4482,7 @@ fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
                 None
             }
         })
-        .collect_vec();
-
-    Ok(output_properties)
+        .collect_vec()
 }
 
 fn merge_eflags<'files, 'data: 'files, C: ElfClass, A: Arch<Platform = Elf<C>>>(
@@ -5507,7 +5524,7 @@ impl<C: ElfClass> Elf<C> {
         };
         defs[output_section_id::SECTION_HEADERS.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(SECTION_HEADERS_SECTION_NAME),
-            section_flags: shf::ALLOC,
+            min_alignment: C::SECTION_HEADER_ALIGNMENT,
             ..Self::DEFAULT_DEFS
         };
         defs[output_section_id::SHSTRTAB.as_usize()] = BuiltInSectionDetails {

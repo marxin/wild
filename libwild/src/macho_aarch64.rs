@@ -167,6 +167,13 @@ impl crate::platform::Arch for MachOAArch64 {
                     1,
                 )
             }
+            object::macho::ARM64_RELOC_ADDEND => (
+                RelocationKind::MachoAddition,
+                RelocationSize::ByteSize(0),
+                None,
+                AllowedRange::no_check(),
+                1,
+            ),
             object::macho::ARM64_RELOC_POINTER_TO_GOT => {
                 debug_assert_eq!(rel_size, RelocationSize::ByteSize(4));
                 (
@@ -250,6 +257,26 @@ impl crate::platform::Arch for MachOAArch64 {
                 Some(Relaxation {
                     kind: RelaxationKind::LdrToAdd,
                     rel_info: relocation,
+                })
+            }
+            object::macho::ARM64_RELOC_GOT_LOAD_PAGE21
+                if flags.has_link_time_address() && !interposable =>
+            {
+                let mut rel = relocation_kind;
+                rel.r_type = object::macho::ARM64_RELOC_PAGE21;
+                Some(Relaxation {
+                    kind: RelaxationKind::NoOp,
+                    rel_info: MachOAArch64::relocation_from_raw(rel).unwrap(),
+                })
+            }
+            object::macho::ARM64_RELOC_GOT_LOAD_PAGEOFF12
+                if flags.has_link_time_address() && !interposable =>
+            {
+                let mut rel = relocation_kind;
+                rel.r_type = object::macho::ARM64_RELOC_PAGEOFF12;
+                Some(Relaxation {
+                    kind: RelaxationKind::LdrToAdd,
+                    rel_info: MachOAArch64::relocation_from_raw(rel).unwrap(),
                 })
             }
             _ => None,
