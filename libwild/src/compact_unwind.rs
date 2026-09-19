@@ -12,10 +12,13 @@ use zerocopy::FromBytes;
 use zerocopy::Immutable;
 use zerocopy::IntoBytes;
 
-// TODO: Copied from `macho-unwind-info` crate and we should upstream it in `object` crate
-
+// The following 3 data structures were copied from the `macho-unwind-info` crate that
+// is licensed under the same licence as this project.
+//
 // Based on an excellent blog post that discusses the data format:
 // https://gankra.github.io/blah/compact-unwinding/
+
+// TODO: Upstream to `object` crate.
 
 /// The `__unwind_info` header.
 #[derive(FromBytes, IntoBytes, Immutable, Debug, Clone, Copy)]
