@@ -2657,7 +2657,7 @@ fn process_relocation<'data, 'scope, A: platform::Arch<Platform = MachO>>(
         let previous_flags = atomic_flags.fetch_or(flags_to_add);
 
         if !is_unwind_personality
-            && is_dynamic_library(&symbol_db.file(symbol_db.file_id_for_symbol(symbol_id)))
+            && from_dynamic_lib
             && relocation.kind == RelocationKind::Absolute
             && relocation.size == RelocationSize::ByteSize(8)
         {
