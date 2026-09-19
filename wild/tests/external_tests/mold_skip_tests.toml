@@ -61,7 +61,6 @@ tests = [
 [skipped_groups.z_options]
 reason = "Related to -z"
 tests = [
-  "z-cet-report.sh",
   "z-dynamic-undefined-weak-exe.sh",
   "z-dynamic-undefined-weak.sh",
   "z-nodefaultlib.sh",
@@ -192,6 +191,7 @@ tests = [
   "version.sh",                     # The message of `--version` is different from mold's one.
   "warn-unresolved-symbols.sh",     # Different message formats
   "whole-archive.sh",               # Passes when `--no-gc-sections` is passed.
+  "z-cet-report.sh",                # Different message formats
   "z-defs.sh",                      # Different message formats
   "thin-archive.sh",                # Different `--trace` output formats
   "static-archive.sh",              # Different `--trace` output formats

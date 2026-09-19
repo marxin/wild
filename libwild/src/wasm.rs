@@ -1693,6 +1693,7 @@ fn build_name_section<'data>(
                 set_name_first_wins(&mut global_names, next_global_import, import.name);
                 next_global_import += 1;
             }
+            crate::wasm_writer::OutputImportEntity::Memory(_) => {}
         }
     }
 
@@ -1836,6 +1837,7 @@ fn count_output_imports(layout: &WasmLayout<'_>) -> (usize, usize) {
         match import.entity {
             crate::wasm_writer::OutputImportEntity::Function { .. } => functions += 1,
             crate::wasm_writer::OutputImportEntity::Global(_) => globals += 1,
+            crate::wasm_writer::OutputImportEntity::Memory(_) => {}
         }
     }
     (functions, globals)
@@ -5698,8 +5700,27 @@ fn linker_output_memory_type(inputs: &[WasmObjectLayoutInput<'_>], shared: bool)
     }
 }
 
-fn ensure_memory_export<'data>(exports: &mut Vec<OutputExport<'data>>, name: &'data str) {
+/// Moves the output memory into the import section so that the module imports its memory from
+/// the host rather than defining it (`--import-memory`).
+fn import_output_memory<'data>(
+    layout: &mut WasmLayout<'data>,
+    module: &'data str,
+    name: &'data str,
+) {
+    for memory in layout.memories.drain(..) {
+        layout.imports.push(OutputImport {
+            module,
+            name,
+            entity: crate::wasm_writer::OutputImportEntity::Memory(memory),
+        });
+    }
+}
+
+fn strip_memory_exports<'data>(exports: &mut Vec<OutputExport<'data>>) {
     exports.retain(|export| !matches!(export.kind, wasmparser::ExternalKind::Memory));
+}
+
+fn push_memory_export<'data>(exports: &mut Vec<OutputExport<'data>>, name: &'data str) {
     exports.push(OutputExport {
         name,
         kind: wasmparser::ExternalKind::Memory,
@@ -5953,6 +5974,12 @@ where
     };
 
     if symbol_db.args.shared_memory {
+        // TODO(wasm): Support --import-memory with --shared-memory
+        // (see https://github.com/wild-linker/wild/issues/2540).
+        ensure!(
+            symbol_db.args.import_memory.is_none(),
+            "--import-memory with --shared-memory is not yet supported"
+        );
         validate_shared_memory_features(&layout_inputs, symbol_db)?;
         if layout_inputs.iter().any(input_has_tls_segments) {
             bail!("shared-memory TLS is not supported yet");
@@ -6007,6 +6034,9 @@ where
     let initial_memory = symbol_db.args.initial_memory;
     let max_memory = symbol_db.args.max_memory;
     let shared_memory = symbol_db.args.shared_memory;
+    let import_memory = symbol_db.args.memory_import();
+    let export_memory = &symbol_db.args.export_memory;
+
     if stack_size > 0 {
         ensure_stack_size_aligned(stack_size)?;
     }
@@ -6159,9 +6189,15 @@ where
                 .memories
                 .push(linker_output_memory_type(&layout_inputs, shared_memory));
         }
-        if !layout.memories.is_empty() {
-            ensure_memory_export(&mut layout.exports, symbol_db.args.memory_export_name());
+
+        // Input objects may export their own memory. We publish at most one, under our own name,
+        // so inherited exports always go, whatever the flags.
+        strip_memory_exports(&mut layout.exports);
+        // Exported by default; --import-memory suppresses that unless --export-memory is passed.
+        if import_memory.is_none() || export_memory.is_some() {
+            push_memory_export(&mut layout.exports, symbol_db.args.memory_export_name());
         }
+
         layout.data_end = memory_cursor;
         let initial_pages = ensure_memory_covers(
             &mut layout,
@@ -6177,6 +6213,9 @@ where
         } else {
             Some(heap_end_from_initial_pages(initial_pages)?)
         };
+        if let Some((module, name)) = import_memory {
+            import_output_memory(&mut layout, module, name);
+        }
         let data_end = layout.data_end;
         compute_data_addresses(
             &mut layout.object_index_maps,

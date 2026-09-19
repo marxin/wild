@@ -125,6 +125,8 @@ pub struct ElfArgs {
     pub(crate) allow_multiple_definitions: bool,
     pub(crate) z_interpose: bool,
     pub(crate) z_isa: Option<NonZeroU32>,
+    pub(crate) force_ibt: bool,
+    pub(crate) cet_report: CetReport,
     pub(crate) z_stack_size: Option<NonZeroU64>,
     pub(crate) z_pack_relative_relocs: bool,
     pub(crate) max_page_size: Option<Alignment>,
@@ -197,6 +199,14 @@ pub(crate) enum PackDynRelocs {
 pub(crate) enum CompressionKind {
     Zlib,
     Zstd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString)]
+#[strum(serialize_all = "lowercase")]
+pub(crate) enum CetReport {
+    None,
+    Warning,
+    Error,
 }
 
 impl ExcludeLibs {
@@ -395,6 +405,8 @@ impl Default for ElfArgs {
             z_interpose: false,
             z_stack_size: None,
             z_isa: None,
+            force_ibt: false,
+            cet_report: CetReport::None,
             z_pack_relative_relocs: false,
             max_page_size: None,
             auxiliary: Vec::new(),
@@ -796,6 +808,24 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
                     exponent: size.trailing_zeros() as u8,
                 });
 
+                Ok(())
+            },
+        )
+        .sub_option(
+            "force-ibt",
+            "Warn if any input file lacks IBT property",
+            |args, _| {
+                args.force_ibt = true;
+                Ok(())
+            },
+        )
+        .sub_option_with_value(
+            "cet-report=",
+            "Report missing CET properties",
+            |args, _, value| {
+                args.cet_report = value
+                    .parse::<CetReport>()
+                    .map_err(|_| error!("unknown -z cet-report= value '{value}'"))?;
                 Ok(())
             },
         )

@@ -30,6 +30,12 @@ pub(crate) const DEFAULT_ENTRY: &str = "_start";
 /// Default export name for the module's linear memory.
 pub(crate) const DEFAULT_MEMORY_EXPORT_NAME: &str = "memory";
 
+/// Default module name used when importing the linear memory (`--import-memory`).
+pub(crate) const DEFAULT_MEMORY_IMPORT_MODULE: &str = "env";
+
+/// Default field name used when importing the linear memory (`--import-memory`).
+pub(crate) const DEFAULT_MEMORY_IMPORT_NAME: &str = "memory";
+
 #[derive(Debug)]
 pub struct WasmArgs {
     pub(crate) common: super::CommonArgs,
@@ -50,6 +56,8 @@ pub struct WasmArgs {
     // Emit a shared linear memory (`memory.shared`). Requires the `atomics` and `bulk-memory`
     // target features.
     pub(crate) shared_memory: bool,
+    // `(module, name)` to import the linear memory from, if `--import-memory` was given.
+    pub(crate) import_memory: Option<(String, String)>,
     pub(crate) gc_sections: bool,
     pub(crate) allow_undefined: bool,
     pub(crate) allow_multiple_definition: bool,
@@ -68,6 +76,12 @@ impl WasmArgs {
             .as_deref()
             .unwrap_or(DEFAULT_MEMORY_EXPORT_NAME)
     }
+
+    pub(crate) fn memory_import(&self) -> Option<(&str, &str)> {
+        self.import_memory
+            .as_ref()
+            .map(|(module, name)| (module.as_str(), name.as_str()))
+    }
 }
 
 impl Default for WasmArgs {
@@ -84,6 +98,7 @@ impl Default for WasmArgs {
             initial_memory: None,
             max_memory: None,
             shared_memory: false,
+            import_memory: None,
             export_memory: None,
             gc_sections: true,
             allow_undefined: false,
@@ -423,6 +438,22 @@ fn setup_argument_parser() -> ArgumentParser<WasmArgs> {
         });
 
     parser
+        .declare_with_optional_param()
+        .long("import-memory")
+        .help("Import the module's memory from <module>,<name> (default \"env\",\"memory\")")
+        .execute(|args, _modifier_stack, value| {
+            let (module, name) = match value {
+                None => (DEFAULT_MEMORY_IMPORT_MODULE, DEFAULT_MEMORY_IMPORT_NAME),
+                Some(value) => value
+                    .split_once(',')
+                    // wasm-ld treats a comma-less value as the name, module defaults to `env`.
+                    .unwrap_or((DEFAULT_MEMORY_IMPORT_MODULE, value)),
+            };
+            args.import_memory = Some((module.to_owned(), name.to_owned()));
+            Ok(())
+        });
+
+    parser
         .declare_with_param()
         .prefix("O")
         .execute(|_args, _modifier_stack, _value|
@@ -557,6 +588,25 @@ mod tests {
         assert_eq!(
             parse_args(["--extra-features=", "-o", "out.wasm"]).extra_features,
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn import_memory() {
+        assert_eq!(
+            parse_args(["--import-memory", "-o", "out.wasm"]).import_memory,
+            Some((
+                DEFAULT_MEMORY_IMPORT_MODULE.to_owned(),
+                DEFAULT_MEMORY_IMPORT_NAME.to_owned()
+            ))
+        );
+        assert_eq!(
+            parse_args(["--import-memory=foo,bar", "-o", "out.wasm"]).import_memory,
+            Some(("foo".to_owned(), "bar".to_owned()))
+        );
+        assert_eq!(
+            parse_args(["--import-memory=foo", "-o", "out.wasm"]).import_memory,
+            Some((DEFAULT_MEMORY_IMPORT_MODULE.to_owned(), "foo".to_owned()))
         );
     }
 }

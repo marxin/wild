@@ -5,6 +5,7 @@ use crate::arch::Architecture;
 use crate::args::BSymbolicKind;
 use crate::args::RelocationModel;
 use crate::args::elf::BuildIdOption;
+use crate::args::elf::CetReport;
 use crate::args::elf::ElfArgs;
 use crate::bail;
 use crate::debug_assert_bail;
@@ -128,6 +129,9 @@ use linker_utils::utils::read_string;
 use linker_utils::utils::read_u32;
 use linker_utils::utils::read_uleb128;
 use object::LittleEndian;
+use object::elf::GNU_PROPERTY_X86_FEATURE_1_AND;
+use object::elf::GNU_PROPERTY_X86_FEATURE_1_IBT;
+use object::elf::GNU_PROPERTY_X86_FEATURE_1_SHSTK;
 use object::read::elf::CompressionHeader;
 use object::read::elf::Crel;
 use object::read::elf::CrelIterator;
@@ -4305,7 +4309,7 @@ pub(crate) enum PropertyClass {
     AndOr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct GnuProperty {
     pub(crate) ptype: object::elf::GnuPropertyType,
     pub(crate) data: u32,
@@ -4385,7 +4389,14 @@ impl LayoutExt {
         args: &ElfArgs,
     ) -> Result<Self> {
         let states = objects_iter(groups).map(|o| &o.format_specific);
-        let gnu_property_notes = merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa);
+        let gnu_property_notes =
+            merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa, args.force_ibt);
+        if args.force_ibt || args.cet_report != crate::args::elf::CetReport::None {
+            for obj in objects_iter(groups) {
+                let filename = obj.input.file.filename.to_string_lossy();
+                check_cet_properties(&filename, &obj.format_specific.gnu_property_notes, args)?;
+            }
+        }
         let riscv_attributes = merge_riscv_attributes::<C, A>(states)?;
         let eflags = merge_eflags::<C, A>(objects_iter(groups).map(|o| o.object))?;
         let has_eh_frame_input = objects_iter(groups).any(|o| o.format_specific.has_eh_frame_input);
@@ -4408,9 +4419,46 @@ impl LayoutExt {
     }
 }
 
+fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -> Result {
+    let feature_bits = props
+        .iter()
+        .find(|p| p.ptype == object::elf::GNU_PROPERTY_X86_FEATURE_1_AND)
+        .map_or(0, |p| p.data);
+
+    if args.force_ibt && (feature_bits & GNU_PROPERTY_X86_FEATURE_1_IBT == 0) {
+        args.warning(format!(
+            "{filename}: -z force-ibt: file does not have GNU_PROPERTY_X86_FEATURE_1_IBT property"
+        ));
+    }
+
+    if args.cet_report != crate::args::elf::CetReport::None {
+        for (bit, name) in [
+            (
+                GNU_PROPERTY_X86_FEATURE_1_IBT,
+                "GNU_PROPERTY_X86_FEATURE_1_IBT",
+            ),
+            (
+                GNU_PROPERTY_X86_FEATURE_1_SHSTK,
+                "GNU_PROPERTY_X86_FEATURE_1_SHSTK",
+            ),
+        ] {
+            if feature_bits & bit == 0 {
+                let msg = format!("{filename}: -z cet-report: file does not have {name} property");
+                match args.cet_report {
+                    CetReport::Warning => args.warning(msg),
+                    CetReport::Error => bail!("{msg}"),
+                    CetReport::None => unreachable!(),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
     states: impl Iterator<Item = &'states ObjectLayoutStateExt<'data, C>>,
     isa_needed: Option<NonZeroU32>,
+    force_ibt: bool,
 ) -> Vec<GnuProperty> {
     timing_phase!("Merge GNU property notes");
 
@@ -4460,7 +4508,7 @@ fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
 
     // Iterate the properties sorted by property_type so that we have a stable output!
 
-    property_map
+    let mut output = property_map
         .into_iter()
         .sorted_by_key(|x| x.0)
         .filter_map(|(property_type, (property_value, property_class))| {
@@ -4482,7 +4530,26 @@ fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
                 None
             }
         })
-        .collect_vec()
+        .collect_vec();
+
+    // Add IBT property if -z force-ibt is set, matching lld behavior.
+    // This is done after merging to ensure force-ibt overrides AND logic.
+    if force_ibt {
+        if let Some(prop) = output
+            .iter_mut()
+            .find(|p| p.ptype == GNU_PROPERTY_X86_FEATURE_1_AND)
+        {
+            prop.data |= GNU_PROPERTY_X86_FEATURE_1_IBT;
+        } else {
+            output.push(GnuProperty {
+                ptype: GNU_PROPERTY_X86_FEATURE_1_AND,
+                data: GNU_PROPERTY_X86_FEATURE_1_IBT,
+            });
+            output.sort_by_key(|p| p.ptype);
+        }
+    }
+
+    output
 }
 
 fn merge_eflags<'files, 'data: 'files, C: ElfClass, A: Arch<Platform = Elf<C>>>(
