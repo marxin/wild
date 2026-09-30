@@ -1658,10 +1658,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         counts: &mut NonAddressableCounts,
         state: &mut EpilogueLayoutExt,
     ) {
-        counts.verdef_count += state
-            .verdefs
-            .as_ref()
-            .map_or_default(|v| v.len() as u16);
+        counts.verdef_count += state.verdefs.as_ref().map_or_default(|v| v.len() as u16);
     }
 
     fn apply_non_addressable_indexes<'data, 'groups>(
