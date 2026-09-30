@@ -214,6 +214,7 @@ pub(crate) type ChainedFixupsHeader = object::macho::DyldChainedFixupsHeader<End
 pub(crate) type ChainedStartsInSegment = object::macho::DyldChainedStartsInSegment<Endianness>;
 pub(crate) type SymtabCommand = object::macho::SymtabCommand<Endianness>;
 pub(crate) type BuildVersionCommand = object::macho::BuildVersionCommand<Endianness>;
+pub(crate) type BuildToolVersion = object::macho::BuildToolVersion<Endianness>;
 pub(crate) type UuidCommand = object::macho::UuidCommand<Endianness>;
 
 pub(crate) const CS_SECTION_ALIGNMENT_EXP: u8 = 4;
@@ -2032,7 +2033,7 @@ impl platform::Platform for MachO {
         allocate_load_cmd(size_of::<CodeSignatureCommand>());
         allocate_load_cmd(size_of::<UuidCommand>());
         if args.platform_version.is_some() {
-            allocate_load_cmd(size_of::<BuildVersionCommand>());
+            allocate_load_cmd(size_of::<BuildVersionCommand>() + size_of::<BuildToolVersion>());
         }
     }
 
