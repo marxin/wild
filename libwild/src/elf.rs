@@ -1661,8 +1661,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         counts.verdef_count += state
             .verdefs
             .as_ref()
-            .map(|v| v.len() as u16)
-            .unwrap_or_default();
+            .map_or_default(|v| v.len() as u16);
     }
 
     fn apply_non_addressable_indexes<'data, 'groups>(

@@ -2041,8 +2041,7 @@ fn write_thunks<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
             let orig_name = layout
                 .symbol_db
                 .symbol_name(*symbol_id)
-                .map(|n| n.bytes().to_vec())
-                .unwrap_or_default();
+                .map_or_default(|n| n.bytes().to_vec());
             let mut thunk_name = crate::elf::THUNK_SYMBOL_PREFIX.as_bytes().to_vec();
             thunk_name.extend_from_slice(&orig_name);
             let entry = symbol_writer.define_symbol(
@@ -6678,8 +6677,7 @@ fn should_reverse_contents<C: ElfClass>(
 fn link_ids<C: ElfClass>(section_id: OutputSectionId) -> &'static [OutputSectionId] {
     elf::Elf::<C>::built_in_section_details()
         .get(section_id.as_usize())
-        .map(|def| def.link)
-        .unwrap_or_default()
+        .map_or_default(|def| def.link)
 }
 
 fn fill_section_padding<C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(

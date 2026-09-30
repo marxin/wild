@@ -267,7 +267,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>, F: FileSystem>(
         .map_or(0, |part_id| section_part_sizes.get(part_id) / 8);
 
     let thunk_blocks = thunk_layout_builder
-        .map(|builder| {
+        .map_or_default(|builder| {
             builder.build(
                 &mut group_states,
                 &symbol_db,
@@ -275,8 +275,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>, F: FileSystem>(
                 &output_sections,
                 &section_part_sizes,
             )
-        })
-        .unwrap_or_default();
+        });
 
     allocate_thunk_block_space::<A::Platform>(
         &mut group_states,

@@ -491,10 +491,9 @@ impl<'data> MergedStringsSection<'data> {
     pub(crate) fn len(&self) -> u64 {
         self.buckets
             .last()
-            .map(|last_bucket| {
+            .map_or_default(|last_bucket| {
                 u64::from(last_bucket.next_offset) + self.bucket_offsets[last_bucket.index]
             })
-            .unwrap_or_default()
     }
 
     pub(crate) fn input_string_byte_size(&self) -> usize {
@@ -801,11 +800,10 @@ struct PoolReservation {
 fn total_input_size(input_sections: &[StringMergeInputSection<'_>]) -> LinearInputOffset {
     input_sections
         .last()
-        .map(|sec| {
+        .map_or_default(|sec| {
             sec.start_input_offset
                 + (sec.section_data.len() as u64).next_multiple_of(MAP_BLOCK_SIZE)
         })
-        .unwrap_or_default()
 }
 
 /// Perform initial processing of the input sections in a group.
