@@ -119,7 +119,7 @@ use object::macho::S_THREAD_LOCAL_REGULAR;
 use object::macho::S_THREAD_LOCAL_VARIABLES;
 use object::macho::S_THREAD_LOCAL_ZEROFILL;
 use object::macho::SegmentFlags;
-use object::macho::TOOL_LD;
+use object::macho::Tool;
 use object::slice_from_bytes_mut;
 use object::write::macho::CodeDirectory;
 use object::write::macho::CodeSignatureEncoder;
@@ -1103,7 +1103,9 @@ fn write_build_version_command(
     command.sdk.set(LE, platform_version.sdk_version.get());
     command.ntools.set(LE, 1);
 
-    tool.tool.set(LE, TOOL_LD);
+    // Randomly picking a tool ID out of the supported list:
+    // https://docs.rs/object/latest/src/object/macho.rs.html#2776-2789
+    tool.tool.set(LE, Tool(1_000_000));
     tool.version.set(
         LE,
         macho::Version::new(
