@@ -1105,7 +1105,7 @@ fn write_build_version_command(
 
     // Randomly picking a tool ID out of the supported list:
     // https://docs.rs/object/latest/src/object/macho.rs.html#2776-2789
-    tool.tool.set(LE, Tool(1_000_000));
+    tool.tool.set(LE, Tool(1684826487));
     tool.version.set(
         LE,
         macho::Version::new(
