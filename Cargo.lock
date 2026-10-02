@@ -1643,7 +1643,8 @@ dependencies = [
 [[package]]
 name = "sharded-offset-map"
 version = "0.3.0"
-source = "git+https://github.com/marxin/sharded-offset-map?branch=mark-get-with-inline#9ef9a90486ae7634fedbe4bab6f61a6708f46a9d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2b71ad2c1fdc235dc70668aff10a50040624596781d443a3389b1203d18e6b7"
 dependencies = [
  "sharded-vec-writer",
 ]
