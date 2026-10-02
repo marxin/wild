@@ -2979,6 +2979,7 @@ fn apply_debug_rela_relocations<'data, C: ElfClass, A: Arch<Platform = elf::Elf<
     Ok(())
 }
 
+#[inline(always)]
 pub(crate) fn apply_debug_relocations<
     'data,
     C: ElfClass,
@@ -3005,6 +3006,7 @@ pub(crate) fn apply_debug_relocations<
     Ok(())
 }
 
+#[inline(always)]
 fn apply_debug_relocations_impl<
     'data,
     C: ElfClass,
@@ -4332,6 +4334,7 @@ fn maybe_get_thunk_for_relocation<C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
     );
 }
 
+#[inline(always)]
 fn apply_debug_relocation<
     'data,
     C: ElfClass,
