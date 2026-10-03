@@ -99,8 +99,8 @@ impl DefinedStubLibrary<'_> {
 
 pub fn parse_defined_library<'data>(input: &'data str) -> Result<DefinedStubLibrary<'data>> {
     // We can benefit from a parallel parsing of some of the commonly used libraries
-    // (e.g. libSystem.B.tbd has 40 sub-libraries). On the other hand, a commonly used one `libc++.1.tbd`
-    // contains just a single library.
+    // (e.g. libSystem.B.tbd has 40 sub-libraries). On the other hand, a commonly used one
+    // `libc++.1.tbd` contains just a single library.
     let documents = input
         .split("--- !tapi-tbd")
         .filter(|document| !document.trim().is_empty())
