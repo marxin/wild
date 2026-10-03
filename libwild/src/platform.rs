@@ -239,6 +239,14 @@ pub(crate) trait Arch: Send + Sync + 'static {
         bail!(".riscv.attribute section is supported only for riscv64 target");
     }
 
+    fn process_aarch64_build_attributes<'data>(
+        _object: &<Self::Platform as Platform>::File<'data>,
+        _format_specific: &mut <Self::Platform as Platform>::ObjectLayoutStateExt<'data>,
+        _aarch64_attributes_section_index: object::SectionIndex,
+    ) -> Result {
+        bail!(".ARM.attributes section is supported only for aarch64 target");
+    }
+
     /// Returns the thunk configuration for this architecture, or `None` if this architecture
     /// doesn't need thunks or we just don't support them yet.
     fn thunk_config() -> Option<ThunkConfig> {
@@ -772,6 +780,7 @@ pub(crate) trait Platform:
         _state: &mut Self::EpilogueLayoutExt,
         _current_sizes: &OutputSectionPartMap<u64>,
         _extra_sizes: &mut OutputSectionPartMap<u64>,
+        _output_sections: &OutputSections<Self>,
         _dynamic_symbol_defs: &[DynamicSymbolDefinition<Self>],
         _format_specific: &Self::FinaliseSizesExt<'_>,
         _args: &Self::Args,

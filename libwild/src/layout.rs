@@ -601,6 +601,23 @@ fn update_defsym_symbol_resolution<'data, P: Platform>(
     resolved_location_counters: &[ResolvedLocationCounter],
 ) -> Result {
     if let SymbolPlacement::Redirect(redirect) = &def_info.placement {
+        let canonical_symbol_id = (!def_info.name.is_empty())
+            .then(|| {
+                symbol_db
+                    .get_unversioned(&UnversionedSymbolName::prehashed(def_info.name))
+                    .map(|id| symbol_db.definition(id))
+                    .ok_or_else(|| redirect.missing_target(def_info.name))
+            })
+            .transpose()?;
+
+        if redirect.is_provide() {
+            let canonical_symbol_id =
+                canonical_symbol_id.ok_or_else(|| redirect.missing_target(def_info.name))?;
+            if resolutions[canonical_symbol_id.as_usize()].is_none() {
+                return Ok(());
+            }
+        }
+
         let value = crate::expression_eval::evaluate_expression(
             &redirect.expression,
             &redirect.loc,
@@ -637,14 +654,9 @@ fn update_defsym_symbol_resolution<'data, P: Platform>(
             },
         )?;
 
-        if def_info.name.is_empty() {
+        let Some(canonical_symbol_id) = canonical_symbol_id else {
             return Ok(());
-        }
-
-        let canonical_symbol_id = symbol_db
-            .get_unversioned(&UnversionedSymbolName::prehashed(def_info.name))
-            .map(|id| symbol_db.definition(id))
-            .ok_or_else(|| redirect.missing_target(def_info.name))?;
+        };
 
         let resolution = resolutions[canonical_symbol_id.as_usize()]
             .as_mut()
@@ -1388,13 +1400,17 @@ impl<P: Platform> HandlerData for LinkerScriptLayoutState<'_, P> {
 impl<'data, P: Platform> SymbolRequestHandler<'data, P> for LinkerScriptLayoutState<'data, P> {
     fn load_symbol<'scope, A: Arch<Platform = P>>(
         &mut self,
-        _common: &mut CommonGroupState<'data, P>,
-        _symbol_id: SymbolId,
-        _resources: &GraphResources<'data, 'scope, P>,
-        _queue: &mut LocalWorkQueue<P>,
-        _scope: &Scope<'scope>,
+        common: &mut CommonGroupState<'data, P>,
+        symbol_id: SymbolId,
+        resources: &'scope GraphResources<'data, 'scope, P>,
+        queue: &mut LocalWorkQueue<P>,
+        scope: &Scope<'scope>,
     ) -> Result {
-        Ok(())
+        let offset = self.symbol_id_range.id_to_offset(symbol_id);
+        let def_info = &self.internal_symbols.symbol_definitions[offset];
+        InternalSymbols::activate_symbol_def::<A>(
+            common, symbol_id, def_info, resources, queue, scope,
+        )
     }
 }
 
@@ -2375,7 +2391,12 @@ fn compute_total_section_part_sizes<'data, P: Platform>(
         unreachable!();
     };
 
-    epilogue.apply_late_size_adjustments(&mut last_group.common, &mut total_sizes, resources)?;
+    epilogue.apply_late_size_adjustments(
+        &mut last_group.common,
+        &mut total_sizes,
+        output_sections,
+        resources,
+    )?;
 
     let first_group = group_states.first_mut().unwrap();
     let Some(FileLayoutState::Prelude(prelude)) = first_group.files.first_mut() else {
@@ -3032,6 +3053,9 @@ impl<'data, P: Platform> FileLayoutState<'data, P> {
                 FileLayoutState::Object(object) => {
                     object.export_dynamic::<A>(common, symbol_id, resources, queue, scope)
                 }
+                FileLayoutState::LinkerScript(state) => SymbolRequestHandler::load_symbol::<A>(
+                    state, common, symbol_id, resources, queue, scope,
+                ),
                 _ => {
                     // Non-loaded and dynamic objects don't do anything in response to a request to
                     // export a dynamic symbol.
@@ -3065,7 +3089,11 @@ impl<'data, P: Platform> FileLayoutState<'data, P> {
                     state, common, symbol_id, resources, queue, scope,
                 )?;
             }
-            FileLayoutState::LinkerScript(_) => {}
+            FileLayoutState::LinkerScript(state) => {
+                SymbolRequestHandler::load_symbol::<A>(
+                    state, common, symbol_id, resources, queue, scope,
+                )?;
+            }
             FileLayoutState::StubLibrary(state) => {
                 P::load_stub_library_symbol(state, symbol_id)?;
             }
@@ -3419,15 +3447,25 @@ impl<'data, P: Platform> PreludeLayoutState<'data, P> {
     ) {
         for (index, def_info) in self.internal_symbols.symbol_definitions.iter().enumerate() {
             let symbol_id = self.symbol_id_range.offset_to_id(index);
-            if !resources.symbol_db.is_canonical(symbol_id) {
-                continue;
-            }
 
             match &def_info.placement {
                 SymbolPlacement::Redirect(redirect) => {
-                    load_redirect_referenced_symbols::<A>(
-                        resources, queue, scope, symbol_id, redirect,
+                    if !resources.symbol_db.is_canonical(symbol_id) {
+                        continue;
+                    }
+                    load_redirect_referenced_symbol::<A>(resources, queue, scope, symbol_id);
+                    load_expression_referenced_symbols::<A>(
+                        resources,
+                        queue,
+                        scope,
+                        &redirect.expression,
                     );
+                }
+                SymbolPlacement::ForceUndefined => {
+                    let target_id = resources.symbol_db.definition(symbol_id);
+                    if !target_id.is_undefined() {
+                        load_redirect_referenced_symbol::<A>(resources, queue, scope, target_id);
+                    }
                 }
                 _ => {}
             }
@@ -3454,19 +3492,7 @@ impl<'data, P: Platform> PreludeLayoutState<'data, P> {
         let symbol_id = resources.symbol_db.definition(symbol_id);
 
         self.entry_symbol_id = Some(symbol_id);
-        let file_id = resources.symbol_db.file_id_for_symbol(symbol_id);
-        let old_flags = resources
-            .per_symbol_flags
-            .get_atomic(symbol_id)
-            .fetch_or(ValueFlags::DIRECT);
-        if !old_flags.has_resolution() {
-            queue.send_work::<A>(
-                resources,
-                file_id,
-                WorkItem::LoadGlobalSymbol(symbol_id),
-                scope,
-            );
-        }
+        load_redirect_referenced_symbol::<A>(resources, queue, scope, symbol_id);
     }
 
     fn finalise_sizes(
@@ -3850,19 +3876,26 @@ impl<'data, P: Platform> PreludeLayoutState<'data, P> {
     }
 }
 
-fn load_redirect_referenced_symbols<'data, 'scope, A: Arch>(
+fn load_redirect_referenced_symbol<'data, 'scope, A: Arch>(
     resources: &'scope GraphResources<'data, '_, <A as Arch>::Platform>,
     queue: &mut LocalWorkQueue<A::Platform>,
     scope: &Scope<'scope>,
     symbol_id: SymbolId,
-    redirect: &crate::parsing::Redirect<'data>,
 ) {
-    resources
+    let file_id = resources.symbol_db.file_id_for_symbol(symbol_id);
+    let old_flags = resources
         .per_symbol_flags
         .get_atomic(symbol_id)
-        .or_assign(ValueFlags::DIRECT);
+        .fetch_or(ValueFlags::DIRECT);
 
-    load_expression_referenced_symbols::<A>(resources, queue, scope, &redirect.expression);
+    if !old_flags.has_resolution() {
+        queue.send_work::<A>(
+            resources,
+            file_id,
+            WorkItem::LoadGlobalSymbol(symbol_id),
+            scope,
+        );
+    }
 }
 
 fn load_expression_referenced_symbols<'data, 'scope, A: Arch>(
@@ -3880,20 +3913,7 @@ fn load_expression_referenced_symbols<'data, 'scope, A: Arch>(
                 .get_unversioned(&UnversionedSymbolName::prehashed(target_name))
         {
             let canonical_target_id = resources.symbol_db.definition(target_symbol_id);
-            let file_id = resources.symbol_db.file_id_for_symbol(canonical_target_id);
-            let old_flags = resources
-                .per_symbol_flags
-                .get_atomic(canonical_target_id)
-                .fetch_or(ValueFlags::DIRECT);
-
-            if !old_flags.has_resolution() {
-                queue.send_work::<A>(
-                    resources,
-                    file_id,
-                    WorkItem::LoadGlobalSymbol(canonical_target_id),
-                    scope,
-                );
-            }
+            load_redirect_referenced_symbol::<A>(resources, queue, scope, canonical_target_id);
         }
         true
     });
@@ -3908,57 +3928,67 @@ impl<'data, P: Platform> InternalSymbols<'data, P> {
         scope: &Scope<'scope>,
     ) -> Result {
         for (offset, def_info) in self.symbol_definitions.iter().enumerate() {
+            // PROVIDE symbols are defined only if referenced.
+            if matches!(&def_info.placement, SymbolPlacement::Redirect(redirect) if redirect.is_provide())
+            {
+                continue;
+            }
+
             let symbol_id = self.start_symbol_id.add_usize(offset);
             if !resources.symbol_db.is_canonical(symbol_id) {
                 continue;
             }
 
-            // Mark the section referenced by this symbol so that empty sections defined by the
-            // linker script are still emitted. Symbols defined within an output-section body keep
-            // that section alive. Symbols between output sections instead belong to the preceding
-            // emitted section, so they must not retain an otherwise discarded section.
-            let section_id = match &def_info.placement {
-                SymbolPlacement::Redirect(Redirect {
-                    loc:
-                        SymbolLoc::SectionStartRelative(section_id)
-                        | SymbolLoc::SectionEndRelative(section_id),
-                    ..
-                }) => Some(*section_id),
-                _ => None,
-            };
-            if let Some(section_id) = section_id {
-                resources
-                    .must_keep_sections
-                    .get(section_id)
-                    .fetch_or(true, atomic::Ordering::Relaxed);
-            }
+            Self::activate_symbol_def::<A>(common, symbol_id, def_info, resources, queue, scope)?;
+        }
 
-            // PROVIDE_HIDDEN symbols should not be exported to dynsym.
-            if def_info.symbol.is_hidden() {
-                continue;
-            }
+        Ok(())
+    }
 
-            match &def_info.placement {
-                SymbolPlacement::Redirect(redirect) => {
-                    load_redirect_referenced_symbols::<A>(
-                        resources, queue, scope, symbol_id, redirect,
-                    );
-                }
-                _ => {}
-            }
-
-            if def_info.name.is_empty() {
-                continue;
-            }
-
+    fn activate_symbol_def<'scope, A: Arch<Platform = P>>(
+        common: &mut CommonGroupState<'data, P>,
+        symbol_id: SymbolId,
+        def_info: &InternalSymDefInfo<'data, P>,
+        resources: &'scope GraphResources<'data, 'scope, P>,
+        queue: &mut LocalWorkQueue<P>,
+        scope: &Scope<'scope>,
+    ) -> Result {
+        // Mark the section referenced by this symbol so that empty sections defined by the
+        // linker script are still emitted. Symbols defined within an output-section body keep
+        // that section alive. Symbols between output sections instead belong to the preceding
+        // emitted section, so they must not retain an otherwise discarded section.
+        let section_id = match &def_info.placement {
+            SymbolPlacement::Redirect(Redirect {
+                loc:
+                    SymbolLoc::SectionStartRelative(section_id)
+                    | SymbolLoc::SectionEndRelative(section_id),
+                ..
+            }) => Some(*section_id),
+            _ => None,
+        };
+        if let Some(section_id) = section_id {
             resources
-                .per_symbol_flags
-                .get_atomic(symbol_id)
-                .fetch_or(ValueFlags::EXPORT_DYNAMIC);
+                .must_keep_sections
+                .get(section_id)
+                .fetch_or(true, atomic::Ordering::Relaxed);
+        }
 
-            if resources.symbol_db.output_kind.needs_dynsym() {
-                export_dynamic(common, symbol_id, resources.symbol_db)?;
-            }
+        if let SymbolPlacement::Redirect(redirect) = &def_info.placement {
+            load_redirect_referenced_symbol::<A>(resources, queue, scope, symbol_id);
+            load_expression_referenced_symbols::<A>(resources, queue, scope, &redirect.expression);
+        }
+
+        if def_info.symbol.is_hidden() || def_info.name.is_empty() {
+            return Ok(());
+        }
+
+        let old_flags = resources
+            .per_symbol_flags
+            .get_atomic(symbol_id)
+            .fetch_or(ValueFlags::EXPORT_DYNAMIC);
+
+        if !old_flags.needs_export_dynamic() && resources.symbol_db.output_kind.needs_dynsym() {
+            export_dynamic(common, symbol_id, resources.symbol_db)?;
         }
 
         Ok(())
@@ -4232,6 +4262,7 @@ impl<'data, P: Platform> EpilogueLayoutState<P> {
         &mut self,
         common: &mut CommonGroupState<'data, P>,
         total_sizes: &mut OutputSectionPartMap<u64>,
+        output_sections: &OutputSections<P>,
         resources: &FinaliseSizesResources<'data, '_, P>,
     ) -> Result {
         let mut extra_sizes = common.mem_sizes.new_empty_like();
@@ -4242,6 +4273,7 @@ impl<'data, P: Platform> EpilogueLayoutState<P> {
             &mut self.format_specific,
             total_sizes,
             &mut extra_sizes,
+            output_sections,
             resources.dynamic_symbol_definitions,
             resources.format_specific,
             resources.symbol_db.args,
@@ -4417,6 +4449,7 @@ impl<'data, P: Platform<GcUnit = SectionGcUnit>> ObjectLayoutState<'data, P> {
         let mut frame_section_indices = SmallVec::<[SectionIndex; 2]>::new();
         let mut note_gnu_property_section = None;
         let mut riscv_attributes_section = None;
+        let mut aarch64_attributes_section = None;
         let mut init_func_section_indices = SmallVec::<[SectionIndex; 1]>::new();
         let mut compact_unwind_section_indices = SmallVec::<[SectionIndex; 1]>::new();
 
@@ -4453,6 +4486,9 @@ impl<'data, P: Platform<GcUnit = SectionGcUnit>> ObjectLayoutState<'data, P> {
                 SectionSlot::RiscvVAttributes(index) => {
                     riscv_attributes_section = Some(*index);
                 }
+                SectionSlot::AArch64Attributes(index) => {
+                    aarch64_attributes_section = Some(*index);
+                }
                 SectionSlot::InitFunc(index) => {
                     init_func_section_indices.push(*index);
                 }
@@ -4486,6 +4522,15 @@ impl<'data, P: Platform<GcUnit = SectionGcUnit>> ObjectLayoutState<'data, P> {
                 riscv_attributes_index,
             )
             .context("Cannot parse .riscv.attributes section")?;
+        }
+
+        if let Some(aarch64_attributes_index) = aarch64_attributes_section {
+            A::process_aarch64_build_attributes(
+                self.object,
+                &mut self.format_specific,
+                aarch64_attributes_index,
+            )
+            .context("Cannot parse .ARM.attributes section")?;
         }
 
         for init_function_section_index in init_func_section_indices {
@@ -4544,6 +4589,7 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
             | SectionSlot::LoadedDebugInfo(..)
             | SectionSlot::NoteGnuProperty(..)
             | SectionSlot::RiscvVAttributes(..)
+            | SectionSlot::AArch64Attributes(..)
             | SectionSlot::InitFunc(..)
             | SectionSlot::CompactUnwind(..) => {}
             SectionSlot::MergeStrings(_) => {
@@ -6211,52 +6257,31 @@ fn compute_layout_sections<'data, P: Platform>(
                         file_offset = alignment.align_up_usize(file_offset);
                     }
 
-                    if section_flags.is_alloc() {
-                        if args.should_output_partial_object() {
-                            let file_size = if output_sections.has_data_in_file(merge_target) {
-                                mem_size as usize
-                            } else {
-                                0
-                            };
+                    let file_size = if section_flags.is_alloc()
+                        && !output_sections.has_data_in_file(merge_target)
+                    {
+                        0
+                    } else {
+                        mem_size as usize
+                    };
 
+                    let (part_mem_offset, part_lma_offset) = if section_flags.is_alloc() {
+                        if args.should_output_partial_object() {
                             let section_id = part_id.output_section_id::<P>();
                             let part_mem_offset =
                                 alignment.align_up(*reloc_alloc_mem_offsets.get(section_id));
                             *reloc_alloc_mem_offsets.get_mut(section_id) =
                                 part_mem_offset + mem_size;
 
-                            *part_layout = OutputRecordLayout {
-                                file_size,
-                                mem_size,
-                                alignment,
-                                file_offset,
-                                mem_offset: part_mem_offset,
-                                lma_offset: part_mem_offset,
-                            };
-
-                            file_offset += file_size;
+                            (part_mem_offset, part_mem_offset)
                         } else {
                             mem_offset = alignment.align_up(mem_offset);
                             lma_offset = alignment.align_up(lma_offset);
 
-                            let file_size = if output_sections.has_data_in_file(merge_target) {
-                                mem_size as usize
-                            } else {
-                                0
-                            };
-
-                            *part_layout = OutputRecordLayout {
-                                file_size,
-                                mem_size,
-                                alignment,
-                                file_offset,
-                                mem_offset,
-                                lma_offset,
-                            };
-
-                            file_offset += file_size;
+                            let offsets = (mem_offset, lma_offset);
                             mem_offset += mem_size;
                             lma_offset += mem_size;
+                            offsets
                         }
                     } else {
                         let section_id = part_id.output_section_id::<P>();
@@ -6264,16 +6289,18 @@ fn compute_layout_sections<'data, P: Platform>(
 
                         *nonalloc_mem_offsets.get_mut(section_id) += mem_size;
 
-                        *part_layout = OutputRecordLayout {
-                            file_size: mem_size as usize,
-                            mem_size,
-                            alignment,
-                            file_offset,
-                            mem_offset,
-                            lma_offset: mem_offset,
-                        };
-                        file_offset += mem_size as usize;
-                    }
+                        (mem_offset, mem_offset)
+                    };
+
+                    *part_layout = OutputRecordLayout {
+                        file_size,
+                        mem_size,
+                        alignment,
+                        file_offset,
+                        mem_offset: part_mem_offset,
+                        lma_offset: part_lma_offset,
+                    };
+                    file_offset += file_size;
 
                     *laid_out_mem_offsets.get_mut(part_id) = Some(part_layout.mem_offset);
 

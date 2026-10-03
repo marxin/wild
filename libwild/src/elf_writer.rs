@@ -1903,6 +1903,15 @@ fn write_object<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
         match sec {
             SectionSlot::Loaded(sec)
             | SectionSlot::PartialLinkSingleton(PartialLinkSingleton { section: sec, .. }) => {
+                let part_id =
+                    object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
+                if layout
+                    .compressed_debug_sections
+                    .get(part_id.output_section_id::<elf::Elf<C>>())
+                    .is_some()
+                {
+                    continue;
+                }
                 table_writer.reset_relr_run();
                 let input_header = object.object.section(section_index)?;
 
@@ -5113,8 +5122,15 @@ fn write_gnu_property_notes<C: ElfClass>(
             .ok()
             .context("Insufficient .note.gnu.property allocation")?;
     note_header.set_name_size(GNU_NOTE_NAME.len() as u32);
+    let descriptor_size = layout
+        .format_specific
+        .gnu_property_notes
+        .iter()
+        .map(|property| property.data.entry_size::<C>())
+        .sum::<u64>();
+
     note_header.set_descriptor_size(
-        (layout.format_specific.gnu_property_notes.len() as u64 * C::GNU_PROPERTY_ENTRY_SIZE)
+        descriptor_size
             .try_into()
             .context(".note.gnu.property descriptor overflowed 32 bits")?,
     );
@@ -5124,14 +5140,31 @@ fn write_gnu_property_notes<C: ElfClass>(
     name_out.copy_from_slice(GNU_NOTE_NAME);
 
     for note in &layout.format_specific.gnu_property_notes {
-        let entry_size = C::GNU_PROPERTY_ENTRY_SIZE as usize;
+        let entry_size = note.data.entry_size::<C>() as usize;
         let entry = rest.split_off_mut(..entry_size).unwrap();
-        let (property_bytes, padding) = entry.split_at_mut(size_of::<NoteProperty>());
-        let property = NoteProperty::mut_from_bytes(property_bytes).unwrap();
-        property.pr_type = note.ptype.0;
-        property.pr_datasz = size_of_val(&property.pr_data) as u32;
-        property.pr_data = note.data;
-        padding.fill(0);
+
+        match note.data {
+            elf::GnuPropertyData::U32(data) => {
+                let (property_bytes, padding) = entry.split_at_mut(size_of::<NoteProperty>());
+                let property = NoteProperty::mut_from_bytes(property_bytes).unwrap();
+                property.pr_type = note.ptype.0;
+                property.pr_datasz = size_of_val(&property.pr_data) as u32;
+                property.pr_data = data;
+                padding.fill(0);
+            }
+            elf::GnuPropertyData::AArch64PAuth(pauth) => {
+                let (property_bytes, padding) =
+                    entry.split_at_mut(size_of::<elf::AArch64PAuthProperty>());
+                let property = elf::AArch64PAuthProperty::mut_from_bytes(property_bytes).unwrap();
+
+                property.pr_type = note.ptype.0;
+                property.pr_datasz = (2 * size_of::<u64>()) as u32;
+                property.platform = pauth.platform;
+                property.version = pauth.version;
+
+                padding.fill(0);
+            }
+        }
     }
 
     Ok(())

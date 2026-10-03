@@ -185,8 +185,6 @@ tests = [
   "static-dso.sh",                  # Different message formats
   "stdout.sh",
   "symver-dup.sh",                  # Different message formats
-  "undefined.sh",                   # Passes when `--no-gc-sections` is passed.
-  "undefined2.sh",                  # Passes when `--no-gc-sections` is passed.
   "unresolved-symbols.sh",          # Different message formats
   "version.sh",                     # The message of `--version` is different from mold's one.
   "warn-unresolved-symbols.sh",     # Different message formats

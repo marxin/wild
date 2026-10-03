@@ -1,5 +1,5 @@
 use crate::OutputFileData;
-use crate::alignment::MACHO_PAGE_ALIGNMENT;
+use crate::alignment::MACHO_PAGE_ALIGNMENT_VALUE;
 use crate::bail;
 use crate::elf::get_page_mask;
 use crate::ensure;
@@ -98,6 +98,7 @@ use object::macho::CS_SUPPORTSEXECSEG;
 use object::macho::CSSLOT_CODEDIRECTORY;
 use object::macho::DYLD_CHAINED_IMPORT;
 use object::macho::DYLD_CHAINED_PTR_64_OFFSET;
+use object::macho::DYLD_CHAINED_PTR_START_NONE;
 use object::macho::LC_BUILD_VERSION;
 use object::macho::LC_CODE_SIGNATURE;
 use object::macho::LC_DYLD_CHAINED_FIXUPS;
@@ -513,7 +514,7 @@ fn write_chained_fixups(layout: &MachOLayout<'_>, out: &mut [u8]) -> Result {
         while let Some(fixup) = fixups.next_if(|fixup| segment_addresses.contains(&fixup.address)) {
             let offset_in_segment = fixup.address - segment.sizes.mem_offset;
             let file_offset = segment.sizes.file_offset + usize::try_from(offset_in_segment)?;
-            let page_index = offset_in_segment / MACHO_PAGE_ALIGNMENT.value();
+            let page_index = offset_in_segment / MACHO_PAGE_ALIGNMENT_VALUE;
 
             let next_fixup = fixups
                 .peek()
@@ -521,7 +522,7 @@ fn write_chained_fixups(layout: &MachOLayout<'_>, out: &mut [u8]) -> Result {
             let next_offset_in_segment =
                 next_fixup.map(|fixup| fixup.address - segment.sizes.mem_offset);
             let next = match next_offset_in_segment {
-                Some(next_offset) if next_offset / MACHO_PAGE_ALIGNMENT.value() == page_index => {
+                Some(next_offset) if next_offset / MACHO_PAGE_ALIGNMENT_VALUE == page_index => {
                     let distance = next_offset - offset_in_segment;
                     // TODO: Support layouts that don't support divisibility by the four byte
                     // chained fixup stride (e.g. manual assembly or packed
@@ -1248,8 +1249,6 @@ fn write_chained_fixup_table(layout: &MachOLayout, chained_fixup_table: &mut [u8
         "unexpected number of active segments"
     );
     let starts_in_image_len = size_of::<u32>() * (segment_count + 1);
-    let starts_in_segment_len =
-        size_of::<ChainedStartsInSegment>() + CHAINED_FIXUP_PAGE_START_SIZE as usize;
     let imports_len = size_of::<u32>() * symbols.len();
     let starts_offset = size_of::<ChainedFixupsHeader>();
 
@@ -1281,26 +1280,45 @@ fn write_chained_fixup_table(layout: &MachOLayout, chained_fixup_table: &mut [u8
         let segment_addresses =
             segment.sizes.mem_offset..segment.sizes.mem_offset + segment.sizes.mem_size;
 
-        // TODO: For now, find the first fixup in a page for each segment. Once we support multiple
-        // pages, we should reimplement this so that we have a linear scan through fixups instead.
-        let Some(fixup) = layout
+        let fixup_pages = layout
             .format_specific
             .fixups
             .iter()
-            .find(|fixup| segment_addresses.contains(&fixup.address))
-        else {
+            .filter(|fixup| segment_addresses.contains(&fixup.address))
+            .map(|fixup| {
+                let offset_in_segment = fixup.address - segment.sizes.mem_offset;
+                (
+                    offset_in_segment / MACHO_PAGE_ALIGNMENT_VALUE,
+                    offset_in_segment % MACHO_PAGE_ALIGNMENT_VALUE,
+                )
+            })
+            .dedup_by(|left, right| left.0 == right.0)
+            .map(|(page_index, first_fixup_offset)| {
+                Ok((
+                    usize::try_from(page_index)?,
+                    u16::try_from(first_fixup_offset)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let Some(&(last_page_index, _)) = fixup_pages.last() else {
             continue;
         };
+
+        let page_count = last_page_index + 1;
+        let page_count_u16 = u16::try_from(page_count).context("Too many chained fixup pages")?;
+        let starts_in_segment_len = size_of::<ChainedStartsInSegment>()
+            + page_count * CHAINED_FIXUP_PAGE_START_SIZE as usize;
 
         // Accounts for both seg_count and __PAGEZERO.
         starts_in_image[i + 2].set(LE, u32::try_from(starts_in_segment_offset)?);
         let starts_in_segment = take_mut::<ChainedStartsInSegment>(&mut rest)?;
-        let page_starts = take_mut::<U16<Endianness>>(&mut rest)?;
 
-        starts_in_segment.size.set(LE, starts_in_segment_len as u32);
+        starts_in_segment
+            .size
+            .set(LE, u32::try_from(starts_in_segment_len)?);
         starts_in_segment
             .page_size
-            .set(LE, MACHO_PAGE_ALIGNMENT.value() as u16);
+            .set(LE, MACHO_PAGE_ALIGNMENT_VALUE as u16);
         starts_in_segment
             .pointer_format
             .set(LE, DYLD_CHAINED_PTR_64_OFFSET);
@@ -1308,14 +1326,17 @@ fn write_chained_fixup_table(layout: &MachOLayout, chained_fixup_table: &mut [u8
             .segment_offset
             .set(LE, segment.sizes.mem_offset - MACHO_START_MEM_ADDRESS);
         starts_in_segment.max_valid_pointer.set(LE, 0);
-        // TODO:
-        starts_in_segment.page_count.set(LE, 1);
-        page_starts.set(
-            LE,
-            u16::try_from(
-                (fixup.address - segment.sizes.mem_offset) % MACHO_PAGE_ALIGNMENT.value(),
-            )?,
-        );
+        starts_in_segment.page_count.set(LE, page_count_u16);
+
+        let mut fixup_pages = fixup_pages.into_iter().peekable();
+        for page_index in 0..page_count {
+            let first_fixup_offset = fixup_pages
+                .next_if(|(fixup_page_index, _)| *fixup_page_index == page_index)
+                .map_or(DYLD_CHAINED_PTR_START_NONE, |(_, offset)| offset);
+            let page_start = take_mut::<U16<Endianness>>(&mut rest)
+                .context("Invalid chained fixups page starts allocation")?;
+            page_start.set(LE, first_fixup_offset);
+        }
 
         starts_in_segment_offset += starts_in_segment_len;
     }
@@ -1330,9 +1351,6 @@ fn write_chained_fixup_table(layout: &MachOLayout, chained_fixup_table: &mut [u8
         .context("Invalid chained fixups imports allocation")?;
 
     // 4) fill up all imported symbols chunked by the pages
-    // TODO: support more pages
-    assert!(symbols.len() < MACHO_PAGE_ALIGNMENT.value() as usize / size_of::<u32>());
-
     let sorted_symbols = &layout.format_specific.imported_symbols;
     let mut symbol_offsets = Vec::with_capacity(sorted_symbols.len());
     let mut str_offset = 0;
