@@ -3360,6 +3360,7 @@ pub(crate) fn resolution_flags(rel_kind: RelocationKind) -> ValueFlags {
         | RelocationKind::AbsoluteAdditionWord6
         | RelocationKind::AbsoluteSubtraction
         | RelocationKind::AbsoluteSubtractionWord6
+        | RelocationKind::AbsoluteLowPart
         | RelocationKind::Relative
         | RelocationKind::RelativeRiscVLow12
         | RelocationKind::RelativeLoongArchHigh
@@ -3370,10 +3371,9 @@ pub(crate) fn resolution_flags(rel_kind: RelocationKind) -> ValueFlags {
         | RelocationKind::PairSubtractionULEB128LoongArch
         | RelocationKind::MachoSubtraction => ValueFlags::DIRECT,
         RelocationKind::SymbolSize => ValueFlags::SYMBOL_SIZE,
-        RelocationKind::None
-        | RelocationKind::AbsoluteLowPart
-        | RelocationKind::Alignment
-        | RelocationKind::MachoAddition => ValueFlags::empty(),
+        RelocationKind::None | RelocationKind::Alignment | RelocationKind::MachoAddition => {
+            ValueFlags::empty()
+        }
     }
 }
 
