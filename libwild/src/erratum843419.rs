@@ -11,6 +11,8 @@
 //! Note the Variant 2 is intentionally excluded as it depends on a dead instruction
 //! (where register of ADRP insn is overwritten by the following one).
 
+use itertools::Itertools;
+
 const ADRP_MARK: u32 = 0x9f00_0000;
 const ADRP_OPCODE: u32 = 0x9000_0000;
 // LDR (unsigned offset)
@@ -43,8 +45,6 @@ enum ErratumVariant {
 }
 
 impl ErratumVariant {
-    const MAX_INSTRUCTION_COUNT: usize = 4;
-
     fn instruction_count(&self) -> usize {
         match self {
             Self::Sequence1A => 4,
@@ -149,4 +149,19 @@ impl ArmInsn {
         // 3) Variant B
         Self::is_final_load_store_imm(&insns[2], register).then_some(ErratumVariant::Sequence1B)
     }
+}
+
+/// Returns byte offsets of all potential erratum sequences in the instruction stream.
+pub(crate) fn erratum_843419_offsets(data: &[u8]) -> Vec<usize> {
+    let insns = data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| ArmInsn::from_opcode(u32::from_le_bytes(*bytes)))
+        .collect_vec();
+
+    (0..insns.len())
+        .filter(|&index| ArmInsn::classify_erratum_843419(&insns[index..]).is_some())
+        .map(|index| index * size_of::<u32>())
+        .collect()
 }

@@ -1148,8 +1148,11 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
             let header = state.object.section(section_index)?;
             let bytes = state.object.section_data_cow(header)?;
 
-            state.format_specific.adrp_count += 123;
-            tracing::debug!(adrp_count = 123, section = %state.object.section_display_name(section_index));
+            let offsets = crate::erratum843419::erratum_843419_offsets(&bytes);
+            state.format_specific.erratum_843419_count += offsets.len();
+            if !offsets.is_empty() {
+                tracing::debug!(erratum_843419_count = offsets.len(), section = %state.object.section_display_name(section_index));
+            }
         }
         Ok(())
     }
@@ -4489,8 +4492,8 @@ pub(crate) struct ObjectLayoutStateExt<'data, C: ElfClass> {
     pub(crate) riscv_attributes: Vec<RiscVAttribute>,
     pub(crate) aarch64_build_attributes: Option<AArch64BuildAttributes>,
 
-    /// Number of ADRP instructions in live executable input sections (AArch64 only).
-    pub(crate) adrp_count: usize,
+    /// Number of potential erratum 843419 sequences in live executable input sections.
+    pub(crate) erratum_843419_count: usize,
 
     has_eh_frame_input: bool,
 
