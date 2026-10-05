@@ -1152,6 +1152,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
             state.format_specific.erratum_843419_count += offsets.len();
             if !offsets.is_empty() {
                 tracing::debug!(erratum_843419_count = offsets.len(), section = %state.object.section_display_name(section_index));
+                dbg!(offsets.len());
             }
         }
         Ok(())
