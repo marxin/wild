@@ -1140,6 +1140,20 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         )
     }
 
+    fn analyze_text_section<'data, A: Arch<Platform = Self>>(
+        state: &mut layout::ObjectLayoutState<'data, Self>,
+        section_index: object::SectionIndex,
+    ) -> Result {
+        if A::arch_identifier() == object::elf::EM_AARCH64 {
+            let header = state.object.section(section_index)?;
+            let bytes = state.object.section_data_cow(header)?;
+
+            state.format_specific.adrp_count += 123;
+            tracing::debug!(adrp_count = 123, section = %state.object.section_display_name(section_index));
+        }
+        Ok(())
+    }
+
     fn load_object_section_relocations<'data, 'scope, A: Arch<Platform = Self>>(
         state: &mut layout::ObjectLayoutState<'data, Self>,
         common: &mut layout::CommonGroupState<'data, Self>,
@@ -4474,6 +4488,9 @@ pub(crate) struct ObjectLayoutStateExt<'data, C: ElfClass> {
     gnu_property_notes: Vec<GnuProperty>,
     pub(crate) riscv_attributes: Vec<RiscVAttribute>,
     pub(crate) aarch64_build_attributes: Option<AArch64BuildAttributes>,
+
+    /// Number of ADRP instructions in live executable input sections (AArch64 only).
+    pub(crate) adrp_count: usize,
 
     has_eh_frame_input: bool,
 
