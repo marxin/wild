@@ -787,8 +787,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
     fn maybe_only_keep_debug<'data, A: Arch<Platform = Self>>(
         layout: &mut layout::Layout<'data, Self>,
     ) -> Result {
-        crate::only_keep_debug::maybe_only_keep_debug_elf::<C>(layout);
-        Ok(())
+        crate::only_keep_debug::maybe_only_keep_debug_elf::<C>(layout)
     }
 
     fn maybe_init_linker_plugin<'data>(
@@ -1154,6 +1153,25 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
             let header = state.object.section(section_index)?;
             if header.sh_type(LittleEndian) == object::elf::SHT_CREL {
                 bail!("CREL with partial linking isn't yet supported: {state}");
+            }
+            if !resources.symbol_db.args.discard_none() {
+                match state.relocations(section_index)? {
+                    RelocationList::Rela(relocations) => {
+                        for raw in relocations {
+                            let rel = ElfRela::<C>::new(*raw);
+                            if let Some(s) = rel.symbol() {
+                                let symbol_id = state.symbol_id_range.input_to_id(s);
+                                resources
+                                    .per_symbol_flags
+                                    .get_atomic(symbol_id)
+                                    .fetch_or(ValueFlags::DIRECT);
+                            }
+                        }
+                    }
+                    RelocationList::Crel(_) => {
+                        bail!("CREL with partial linking isn't yet supported: {state}")
+                    }
+                }
             }
             return Ok(());
         }
@@ -6713,9 +6731,18 @@ fn materialize_relocation_requirements<'data, C: ElfClass, A: Arch<Platform = El
         }
     } else if flags.is_ifunc()
         && rel_kind == RelocationKind::Absolute
-        && section_is_writable
-        && symbol_db.output_kind.is_position_independent()
+        && A::absolute_ifunc_needs_irelative(symbol_db.output_kind, section_is_writable)
     {
+        if classified.rel_size != RelocationSize::ByteSize(C::ADDRESS_SIZE as u8) {
+            bail!(
+                "Relocation {} against ifunc `{}` is narrower than an address",
+                A::rel_type_to_string(r_type),
+                resources.symbol_db.symbol_name_for_display(symbol_id),
+            );
+        }
+        if !section_is_writable {
+            resources.has_textrel.store(true, atomic::Ordering::Relaxed);
+        }
         common.allocate(part_id::RELA_DYN_GENERAL, C::RELA_ENTRY_SIZE);
     } else if symbol_db.output_kind.is_position_independent()
         && rel_kind == RelocationKind::Absolute

@@ -383,6 +383,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>, F: FileSystem>(
         &program_segments,
         header_info,
         symbol_db.args,
+        SegmentFileLayout::FromSections,
     )?;
 
     let mem_offsets: OutputSectionPartMap<u64> = starting_memory_offsets(&section_part_layouts);
@@ -493,6 +494,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>, F: FileSystem>(
         merged_string_start_addresses,
         has_static_tls: gc_outputs.has_static_tls,
         has_variant_pcs: gc_outputs.has_variant_pcs,
+        has_textrel: gc_outputs.has_textrel,
         relocation_statistics,
         per_symbol_flags,
         dynamic_symbol_definitions,
@@ -837,6 +839,7 @@ pub struct Layout<'data, P: Platform> {
     pub(crate) relocation_statistics: OutputSectionMap<AtomicU64>,
     pub(crate) has_static_tls: bool,
     pub(crate) has_variant_pcs: bool,
+    pub(crate) has_textrel: bool,
     pub(crate) per_symbol_flags: PerSymbolFlags,
     pub(crate) dynamic_symbol_definitions: Vec<DynamicSymbolDefinition<'data, P>>,
     pub(crate) format_specific: P::LayoutExt<'data>,
@@ -1701,6 +1704,8 @@ pub(crate) struct GraphResources<'data, 'scope, P: Platform> {
 
     pub(crate) has_static_tls: AtomicBool,
 
+    pub(crate) has_textrel: AtomicBool,
+
     has_variant_pcs: AtomicBool,
 
     pub(crate) thunk_layout_builder: Option<crate::thunks::ThunkLayoutBuilder>,
@@ -1789,8 +1794,8 @@ impl<'data, P: Platform> Layout<'data, P> {
     }
 
     /// Rebuilds merged section records and program-header file ranges from the current section file
-    /// offsets. Debug compression updates those offsets after the initial layout pass.
-    pub(crate) fn refresh_layouts_after_debug_compression(&mut self) -> Result {
+    /// offsets, preserving their memory layout.
+    pub(crate) fn refresh_file_layouts(&mut self, file_layout: SegmentFileLayout) -> Result {
         self.merged_section_layouts =
             merge_secondary_parts(&self.output_sections, &self.section_layouts);
 
@@ -1809,6 +1814,7 @@ impl<'data, P: Platform> Layout<'data, P> {
             &self.program_segments,
             &header_info,
             self.args(),
+            file_layout,
         )?;
         Ok(())
     }
@@ -2050,6 +2056,25 @@ fn layout_section_from_part_layouts<'data, P: Platform>(
     };
 }
 
+/// Places a section and its parts at the supplied offset. The caller handles alignment padding.
+pub(crate) fn assign_section_file_range<P: Platform>(
+    section_id: OutputSectionId,
+    section_layout: &mut OutputRecordLayout,
+    part_layouts: &mut OutputSectionPartMap<OutputRecordLayout>,
+    mut file_offset: usize,
+) -> usize {
+    let start = file_offset;
+    for part_id in section_id.parts::<P>() {
+        let part_layout = part_layouts.get_mut(part_id);
+        part_layout.file_offset = file_offset;
+        file_offset += part_layout.file_size;
+    }
+
+    section_layout.file_offset = start;
+    section_layout.file_size = file_offset - start;
+    file_offset
+}
+
 pub(crate) fn merge_secondary_parts<P: Platform>(
     output_sections: &OutputSections<P>,
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
@@ -2151,6 +2176,14 @@ fn compute_symbols_and_layouts<'data, P: Platform>(
         .collect()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SegmentFileLayout {
+    /// Derive segment file bounds from member sections, including empty sections.
+    FromSections,
+    /// Start at the compaction cursor, including following padding but excluding empty sections.
+    Compacted,
+}
+
 fn compute_segment_layout<'data, P: Platform>(
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
     output_sections: &OutputSections<P>,
@@ -2158,6 +2191,7 @@ fn compute_segment_layout<'data, P: Platform>(
     program_segments: &ProgramSegments<P::ProgramSegmentDef>,
     header_info: &HeaderInfo,
     args: &P::Args,
+    file_layout: SegmentFileLayout,
 ) -> Result<SegmentLayouts> {
     #[derive(Clone)]
     struct Record {
@@ -2181,6 +2215,7 @@ fn compute_segment_layout<'data, P: Platform>(
         return Ok(SegmentLayouts::default());
     }
 
+    let mut file_offset = 0;
     for event in output_order {
         match event {
             OrderEvent::SegmentStart(segment_id) => {
@@ -2208,6 +2243,11 @@ fn compute_segment_layout<'data, P: Platform>(
                         alignment: alignment::MIN,
                     });
                 }
+                if file_layout == SegmentFileLayout::Compacted {
+                    let record = active_segments[segment_id.as_usize()].as_mut().unwrap();
+                    record.file_start = file_offset;
+                    record.file_end = file_offset;
+                }
             }
             OrderEvent::SegmentEnd(segment_id) => {
                 let record = active_segments[segment_id.as_usize()]
@@ -2227,6 +2267,16 @@ fn compute_segment_layout<'data, P: Platform>(
                 {
                     continue;
                 }
+
+                if file_layout == SegmentFileLayout::Compacted {
+                    file_offset = section_layout.file_end();
+                    if section_layout.file_size > 0 {
+                        for record in active_segments.iter_mut().flatten() {
+                            record.file_end = record.file_end.max(file_offset);
+                        }
+                    }
+                }
+
                 let section_flags = output_sections.section_flags(merge_target);
                 let section_info = output_sections.output_info(section_id);
 
@@ -2269,13 +2319,13 @@ fn compute_segment_layout<'data, P: Platform>(
                             continue;
                         }
 
-                        rec.file_start = rec.file_start.min(section_layout.file_offset);
+                        if file_layout == SegmentFileLayout::FromSections {
+                            rec.file_start = rec.file_start.min(section_layout.file_offset);
+                            rec.file_end = rec.file_end.max(section_layout.file_end());
+                        }
                         rec.mem_start = rec.mem_start.min(section_layout.mem_offset);
                         rec.lma_start = rec.lma_start.min(section_layout.lma_offset);
 
-                        rec.file_end = rec
-                            .file_end
-                            .max(section_layout.file_offset + section_layout.file_size);
                         rec.mem_end = rec
                             .mem_end
                             .max(section_layout.mem_offset + section_layout.mem_size);
@@ -2303,25 +2353,19 @@ fn compute_segment_layout<'data, P: Platform>(
         .map(|&id| {
             let r = &complete[id.as_usize()];
 
-            let sizes = if r.file_start <= r.file_end {
-                OutputRecordLayout {
-                    file_size: r.file_end - r.file_start,
-                    mem_size: r.mem_end - r.mem_start,
-                    alignment: r.alignment,
-                    file_offset: r.file_start,
-                    mem_offset: r.mem_start,
-                    lma_offset: r.lma_start,
-                }
-            } else {
-                OutputRecordLayout {
-                    file_size: 0,
-                    mem_size: 0,
-                    alignment: r.alignment,
-                    file_offset: 0,
-                    mem_offset: 0,
-                    lma_offset: 0,
-                }
+            let mut sizes = OutputRecordLayout {
+                alignment: r.alignment,
+                ..Default::default()
             };
+            if r.file_start <= r.file_end {
+                sizes.file_offset = r.file_start;
+                sizes.file_size = r.file_end - r.file_start;
+            }
+            if r.mem_start <= r.mem_end {
+                sizes.mem_offset = r.mem_start;
+                sizes.mem_size = r.mem_end - r.mem_start;
+                sizes.lma_offset = r.lma_start;
+            }
 
             if program_segments.is_tls_segment(id) {
                 tls_layout = Some(sizes);
@@ -2560,6 +2604,7 @@ struct GcOutputs<'data, P: Platform> {
     group_states: Vec<GroupState<'data, P>>,
     must_keep_sections: OutputSectionMap<bool>,
     has_static_tls: bool,
+    has_textrel: bool,
     has_variant_pcs: bool,
     thunk_layout_builder: Option<ThunkLayoutBuilder>,
 }
@@ -2639,6 +2684,7 @@ fn traverse_reference_graph<'data, A: Arch>(
         per_symbol_flags,
         must_keep_sections: output_sections.new_section_map(),
         has_static_tls: AtomicBool::new(false),
+        has_textrel: AtomicBool::new(false),
         has_variant_pcs: AtomicBool::new(false),
         thunk_layout_builder,
         layout_resources_ext,
@@ -2675,6 +2721,7 @@ fn traverse_reference_graph<'data, A: Arch>(
         group_states,
         must_keep_sections,
         has_static_tls: resources.has_static_tls.load(atomic::Ordering::Relaxed),
+        has_textrel: resources.has_textrel.load(atomic::Ordering::Relaxed),
         has_variant_pcs: resources.has_variant_pcs.load(atomic::Ordering::Relaxed),
         thunk_layout_builder: resources.thunk_layout_builder,
     })
@@ -3360,6 +3407,7 @@ pub(crate) fn resolution_flags(rel_kind: RelocationKind) -> ValueFlags {
         | RelocationKind::AbsoluteAdditionWord6
         | RelocationKind::AbsoluteSubtraction
         | RelocationKind::AbsoluteSubtractionWord6
+        | RelocationKind::AbsoluteLowPart
         | RelocationKind::Relative
         | RelocationKind::RelativeRiscVLow12
         | RelocationKind::RelativeLoongArchHigh
@@ -3370,10 +3418,9 @@ pub(crate) fn resolution_flags(rel_kind: RelocationKind) -> ValueFlags {
         | RelocationKind::PairSubtractionULEB128LoongArch
         | RelocationKind::MachoSubtraction => ValueFlags::DIRECT,
         RelocationKind::SymbolSize => ValueFlags::SYMBOL_SIZE,
-        RelocationKind::None
-        | RelocationKind::AbsoluteLowPart
-        | RelocationKind::Alignment
-        | RelocationKind::MachoAddition => ValueFlags::empty(),
+        RelocationKind::None | RelocationKind::Alignment | RelocationKind::MachoAddition => {
+            ValueFlags::empty()
+        }
     }
 }
 
@@ -5074,6 +5121,13 @@ impl<'data> SymbolCopyInfo<'data> {
         symbol_state: ValueFlags,
         sections: &[SectionSlot],
     ) -> Option<SymbolCopyInfo<'data>> {
+        let is_referenced_by_reloc =
+            symbol_db.args.should_output_partial_object() && symbol_state.has_resolution();
+
+        if !is_referenced_by_reloc && symbol_db.args.discard_all() && sym.is_local() {
+            return None;
+        }
+
         if !symbol_db.is_canonical(symbol_id) || sym.is_undefined() {
             return None;
         }
@@ -5094,7 +5148,9 @@ impl<'data> SymbolCopyInfo<'data> {
         // needs the name, doesn't have a go and read it again.
         let name = object.symbol_name(sym).ok()?;
         if name.is_empty()
-            || (!symbol_db.args.should_output_partial_object() && sym.is_default_strippable(name))
+            || (!is_referenced_by_reloc
+                && !symbol_db.args.discard_none()
+                && sym.is_default_strippable(name))
         {
             return None;
         }
@@ -6257,12 +6313,10 @@ fn compute_layout_sections<'data, P: Platform>(
                         file_offset = alignment.align_up_usize(file_offset);
                     }
 
-                    let file_size = if section_flags.is_alloc()
-                        && !output_sections.has_data_in_file(merge_target)
-                    {
-                        0
-                    } else {
+                    let file_size = if output_sections.has_data_in_file(merge_target) {
                         mem_size as usize
+                    } else {
+                        0
                     };
 
                     let (part_mem_offset, part_lma_offset) = if section_flags.is_alloc() {
@@ -6805,6 +6859,7 @@ fn test_no_disallowed_overlaps() {
         &program_segments,
         &header_info,
         &args,
+        SegmentFileLayout::FromSections,
     )
     .unwrap();
 
