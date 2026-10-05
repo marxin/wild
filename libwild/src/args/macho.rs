@@ -74,7 +74,7 @@ const SILENTLY_IGNORED_FLAGS: &[&str] = &[
     "dead_strip",
 ];
 
-const IGNORED_FLAGS: &[&str] = &["export_dynamic"];
+const IGNORED_FLAGS: &[&str] = &["export_dynamic", "O0", "O1", "O2", "O3"];
 
 impl MachOArgs {
     pub(crate) fn new() -> Result<Self> {
