@@ -166,7 +166,7 @@ pub(crate) struct ErratumMask {
 }
 
 fn erratum_mask_from_offset(
-    erratum_offsets: Vec<usize>,
+    erratum_offsets: &[usize],
     section_alignment: u64,
 ) -> Result<Option<ErratumMask>> {
     let section_alignment = section_alignment as usize;
@@ -226,5 +226,5 @@ pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option
         .map(|offset| (offset % ERRATUM_PAGE_SIZE) / 4)
         .unique()
         .collect_vec();
-    erratum_mask_from_offset(erratum_offsets, section_alignment)
+    erratum_mask_from_offset(&erratum_offsets, section_alignment)
 }
