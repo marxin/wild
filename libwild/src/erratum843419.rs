@@ -158,8 +158,10 @@ const ERRATUM_INSN_OFFSETS: usize = ERRATUM_PAGE_SIZE / 4;
 #[derive(Debug)]
 pub(crate) struct ErratumMask {
     // Section start offsets within a page, in instruction units, that could trigger the erratum.
+    #[allow(dead_code)]
     pub(crate) mask: FixedBitSet,
     // Section alignment in bytes.
+    #[allow(dead_code)]
     pub(crate) alignment: usize,
     // Maximum padding in bytes needed to make any valid section placement safe.
     pub(crate) maximal_padding: usize,

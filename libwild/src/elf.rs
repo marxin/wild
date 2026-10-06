@@ -4492,9 +4492,6 @@ pub(crate) struct ObjectLayoutStateExt<'data, C: ElfClass> {
     pub(crate) riscv_attributes: Vec<RiscVAttribute>,
     pub(crate) aarch64_build_attributes: Option<AArch64BuildAttributes>,
 
-    /// Number of potential erratum 843419 sequences in live executable input sections.
-    pub(crate) erratum_843419_count: usize,
-
     has_eh_frame_input: bool,
 
     cies: SmallVec<[CieAtOffset<'data>; 2]>,
