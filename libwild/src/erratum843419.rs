@@ -228,3 +228,53 @@ pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option
         .collect_vec();
     erratum_mask_from_offset(&erratum_offsets, section_alignment)
 }
+
+#[test]
+fn test_erratum_mask_from_offset() {
+    // Offsets are in instruction units; alignment and padding are in bytes.
+    let cases: &[(&[usize], u64, Option<usize>)] = &[
+        (&[], 4, None),
+        (&[], 4096, None),
+        (&[0], 4, Some(8)),
+        (&[0], 8, Some(8)),
+        (&[0], 16, Some(0)),
+        (&[1], 4, Some(8)),
+        (&[1022], 4, Some(8)),
+        (&[1022], 8, Some(8)),
+        (&[1022], 16, Some(16)),
+        (&[1023], 4, Some(8)),
+        (&[1023], 8, Some(8)),
+        (&[0, 2], 4, Some(16)),
+        (&[0, 2, 4], 4, Some(24)),
+        (&[0, 2, 4, 6], 4, Some(32)),
+        (&[0, 0], 4, Some(8)),
+        (&[1024], 4, Some(8)),
+        (&[0], 4096, Some(0)),
+        (&[0], 8192, Some(0)),
+    ];
+
+    for &(offsets, alignment, expected) in cases {
+        assert_eq!(
+            erratum_mask_from_offset(offsets, alignment)
+                .unwrap()
+                .map(|mask| mask.maximal_padding),
+            expected,
+            "offsets={offsets:?}, alignment={alignment}"
+        );
+    }
+
+    let error_cases: &[(&[usize], u64)] = &[
+        (&[0], 0),
+        (&[0], 1),
+        (&[0], 2),
+        (&[1022], 4096),
+        (&[1023], 8192),
+        (&[510, 1022], 2048),
+    ];
+    for &(offsets, alignment) in error_cases {
+        assert!(
+            erratum_mask_from_offset(offsets, alignment).is_err(),
+            "offsets={offsets:?}, alignment={alignment}"
+        );
+    }
+}

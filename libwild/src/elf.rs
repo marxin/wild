@@ -1151,7 +1151,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
 
             let erratum_mask = crate::erratum843419::erratum_mask(&bytes, alignment)?;
             if let Some(erratum_mask) = erratum_mask {
-                dbg!(erratum_mask.maximal_padding);
+                tracing::trace!(erratum_mask.maximal_padding, section = %state.object.section_display_name(section_index));
             }
         }
         Ok(())
