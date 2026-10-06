@@ -165,15 +165,11 @@ pub(crate) struct ErratumMask {
     pub(crate) maximal_padding: usize,
 }
 
-pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option<ErratumMask>> {
+fn erratum_mask_from_offset(
+    erratum_offsets: Vec<usize>,
+    section_alignment: u64,
+) -> Result<Option<ErratumMask>> {
     let section_alignment = section_alignment as usize;
-    debug_assert!(section_alignment.is_power_of_two());
-    let erratum_offsets = erratum_843419_offsets(data)
-        .into_iter()
-        .map(|offset| (offset % ERRATUM_PAGE_SIZE) / 4)
-        .unique()
-        .collect_vec();
-
     if erratum_offsets.is_empty() {
         return Ok(None);
     }
@@ -222,4 +218,14 @@ pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option
         mask,
         maximal_padding,
     }))
+}
+
+pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option<ErratumMask>> {
+    debug_assert!(section_alignment.is_power_of_two());
+    let erratum_offsets = erratum_843419_offsets(data)
+        .into_iter()
+        .map(|offset| (offset % ERRATUM_PAGE_SIZE) / 4)
+        .unique()
+        .collect_vec();
+    erratum_mask_from_offset(erratum_offsets, section_alignment)
 }
