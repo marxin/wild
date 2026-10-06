@@ -2,9 +2,9 @@
 //! Software Developers Errata Notice: https://documentation-service.arm.com/static/5fa29fddb209f547eebd361d
 //!
 //! Description:
-//! When executing in AArch64 state, a load or store instruction which uses the result of an ADRP instruction as a base
-//! register, or which uses a base register written by an instruction immediately after an ADRP to the same register, might
-//! access an incorrect address.
+//! When executing in AArch64 state, a load or store instruction which uses the result of an ADRP
+//! instruction as a base register, or which uses a base register written by an instruction
+//! immediately after an ADRP to the same register, might access an incorrect address.
 //!
 //! Workaround: Prevent affected sequences from crossing a 4 KiB page boundary by keeping
 //! the ADRP away from page offsets 0xFF8 and 0xFFC.
@@ -12,12 +12,11 @@
 //! Variant 2 is intentionally excluded because it involves a dead ADRP instruction:
 //! where the following instruction overwrites its destination register.
 
-use fixedbitset::FixedBitSet;
-use itertools::Itertools;
-
 use crate::Result;
 use crate::ensure;
 use crate::error;
+use fixedbitset::FixedBitSet;
+use itertools::Itertools;
 
 const ADRP_MARK: u32 = 0x9f00_0000;
 const ADRP_OPCODE: u32 = 0x9000_0000;
@@ -122,7 +121,8 @@ impl ArmInsn {
                 Self::Ldr { rt, .. } if rt == register => {}
                 ArmInsn::Adrp { rd } if rd == register => {}
                 _ => {
-                    // 4) Load/store register (unsigned immediate)" encoding class, using Rn as the base address register.
+                    // 4) Load/store register (unsigned immediate)" encoding class, using Rn as the
+                    //    base address register.
                     if Self::is_final_load_store_imm(&insns[3], register) {
                         return true;
                     }
@@ -176,7 +176,8 @@ fn erratum_mask_from_offset(
         return Ok(None);
     }
 
-    // Set a bit for each section start offset that places an affected ADRP at an unsafe page offset.
+    // Set a bit for each section start offset that places an affected ADRP at an unsafe page
+    // offset.
     let mut mask = FixedBitSet::with_capacity(ERRATUM_INSN_OFFSETS);
     for section_start in 0..ERRATUM_INSN_OFFSETS {
         if erratum_offsets.iter().any(|offset| {
