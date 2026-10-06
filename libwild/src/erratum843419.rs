@@ -37,29 +37,6 @@ enum ArmInsn {
     Unrecognized,
 }
 
-enum ErratumVariant {
-    // Sequence 1 with 4 instructions
-    Sequence1A,
-    // Sequence 1 with 3 instructions
-    Sequence1B,
-}
-
-impl ErratumVariant {
-    fn instruction_count(&self) -> usize {
-        match self {
-            Self::Sequence1A => 4,
-            Self::Sequence1B => 3,
-        }
-    }
-
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Sequence1A => "sequence 1A",
-            Self::Sequence1B => "sequence 1B",
-        }
-    }
-}
-
 impl ArmInsn {
     fn is_final_load_store_imm(insn: &ArmInsn, register: u32) -> bool {
         match insn {
@@ -109,22 +86,24 @@ impl ArmInsn {
         }
     }
 
-    fn classify_erratum_843419(insns: &[ArmInsn]) -> Option<ErratumVariant> {
+    /// Return true if the sequence of instructions starts with ADRP that is subject
+    /// to the erratum. Otherwise, return false.
+    fn starts_with_erratum_843419(insns: &[ArmInsn]) -> bool {
         if insns.len() < 3 {
-            return None;
+            return false;
         }
 
         // 1) ADRP
         let ArmInsn::Adrp { rd: register } = insns[0] else {
-            return None;
+            return false;
         };
 
         // 2) A load or store instruction:
         // ...
         // This must not write to Rn.
         match insns[1] {
-            Self::Add { .. } | Self::Adrp { .. } | Self::Branch => return None,
-            ArmInsn::Ldr { rt, .. } if rt == register => return None,
+            Self::Add { .. } | Self::Adrp { .. } | Self::Branch => return false,
+            ArmInsn::Ldr { rt, .. } if rt == register => return false,
             _ => {}
         }
 
@@ -140,14 +119,14 @@ impl ArmInsn {
                 _ => {
                     // 4) Load/store register (unsigned immediate)" encoding class, using Rn as the base address register.
                     if Self::is_final_load_store_imm(&insns[3], register) {
-                        return Some(ErratumVariant::Sequence1A);
+                        return true;
                     }
                 }
             }
         }
 
         // 3) Variant B
-        Self::is_final_load_store_imm(&insns[2], register).then_some(ErratumVariant::Sequence1B)
+        Self::is_final_load_store_imm(&insns[2], register)
     }
 }
 
@@ -161,7 +140,7 @@ pub(crate) fn erratum_843419_offsets(data: &[u8]) -> Vec<usize> {
         .collect_vec();
 
     (0..insns.len())
-        .filter(|&index| ArmInsn::classify_erratum_843419(&insns[index..]).is_some())
+        .filter(|&index| ArmInsn::starts_with_erratum_843419(&insns[index..]))
         .map(|index| index * size_of::<u32>())
         .collect()
 }
