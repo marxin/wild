@@ -159,7 +159,7 @@ const ERRATUM_INSN_OFFSETS: usize = ERRATUM_PAGE_SIZE / 4;
 pub(crate) struct ErratumMask {
     // Erratum page offsets (expressed in offsets in instructions) that will trigger the erratum.
     pub(crate) mask: FixedBitSet,
-    // Section alignment (in number of instructions)
+    // Section alignment (in bytes)
     pub(crate) alignment: usize,
     // A necessary padding to move all errata from any given offsets in a final binary (in bytes)
     pub(crate) maximal_padding: usize,
@@ -167,7 +167,7 @@ pub(crate) struct ErratumMask {
 
 pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option<ErratumMask>> {
     let section_alignment = section_alignment as usize;
-    debug_assert!(section_alignment.is_multiple_of(2));
+    debug_assert!(section_alignment.is_power_of_two());
     let erratum_offsets = erratum_843419_offsets(data)
         .into_iter()
         .map(|offset| (offset % ERRATUM_PAGE_SIZE) / 4)
@@ -177,10 +177,6 @@ pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option
     if erratum_offsets.is_empty() {
         return Ok(None);
     }
-    ensure!(
-        section_alignment < ERRATUM_PAGE_SIZE,
-        "cannot fix erratum for a section with large alignment: {section_alignment}"
-    );
 
     // Mask has bit set to true if that offset will put any of the erratum offests into the wrong position.
     let mut mask = FixedBitSet::with_capacity(ERRATUM_INSN_OFFSETS);
@@ -193,6 +189,12 @@ pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option
         }
     }
 
+    ensure!(
+        // We know the alignment is a multiple of 4096, so check if we're safe at page boundary.
+        section_alignment < ERRATUM_PAGE_SIZE || !mask[0],
+        "cannot fix erratum for a section with large alignment: {section_alignment}"
+    );
+
     // Now for each bit set (bad page offset), calculate how many multiples of an alignment will be needed to fix it
     // so each erratum will be out of the problematic offests.
     ensure!(
@@ -202,6 +204,8 @@ pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option
     let alignment_in_insns = section_alignment / 4;
     let necessary_shifts = mask
         .ones()
+        // Consider only valid section alignments.
+        .filter(|i| i % alignment_in_insns == 0)
         .map(|i| {
             // Just try all the possible multiples of a the alignment and check if we reach
             // a configuration that is safe.
@@ -211,7 +215,7 @@ pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option
                 .ok_or_else(|| error!("Cannot find a valid offset for an erratum"))
         })
         .collect::<Result<Vec<_>>>()?;
-    let maximal_padding = 4 * necessary_shifts.into_iter().max().unwrap();
+    let maximal_padding = 4 * necessary_shifts.into_iter().max().unwrap_or(0);
 
     Ok(Some(ErratumMask {
         alignment: section_alignment,
