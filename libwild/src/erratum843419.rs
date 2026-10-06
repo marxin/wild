@@ -186,11 +186,10 @@ pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option
     let mut mask = FixedBitSet::with_capacity(ERRATUM_INSN_OFFSETS);
     for section_start in 0..ERRATUM_INSN_OFFSETS {
         if erratum_offsets.iter().any(|offset| {
-            let i = *offset + section_start;
+            let i = (*offset + section_start) % ERRATUM_INSN_OFFSETS;
             i == 0xff8 / 4 || i == 0xffc / 4
         }) {
             mask.put(section_start);
-            break;
         }
     }
 
