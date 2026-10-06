@@ -1,15 +1,16 @@
-//! Erratum 843419: A load or store might access an incorrect address
-//! Software Developers Errata Notice link: https://documentation-service.arm.com/static/5fa29fddb209f547eebd361d
+//! Erratum 843419: A load or store might access an incorrect address.
+//! Software Developers Errata Notice: https://documentation-service.arm.com/static/5fa29fddb209f547eebd361d
 //!
 //! Description:
 //! When executing in AArch64 state, a load or store instruction which uses the result of an ADRP instruction as a base
 //! register, or which uses a base register written by an instruction immediately after an ADRP to the same register, might
 //! access an incorrect address.
 //!
-//! Workaround: Ensuring the ADRP and the load/store is in a diffeent page (ADRP cannot be placed at address ending with 0xFF8 or 0xFFC).
+//! Workaround: Prevent affected sequences from crossing a 4 KiB page boundary by keeping
+//! the ADRP away from page offsets 0xFF8 and 0xFFC.
 //!
-//! Note the Variant 2 is intentionally excluded as it depends on a dead instruction
-//! (where register of ADRP insn is overwritten by the following one).
+//! Variant 2 is intentionally excluded because it involves a dead ADRP instruction:
+//! where the following instruction overwrites its destination register.
 
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
@@ -70,7 +71,7 @@ impl ArmInsn {
                 rd: insn & REGISTER_MASK,
             }
         } else if insn & LDR_UNSIGNED_MASK == LDR_UNSIGNED_OPCODE {
-            // Note Ldr is a actually a part of LdrStr, parse it earlier.
+            // Ldr is a subset of LdrStr, so decode it first.
             Self::Ldr {
                 rt: insn & REGISTER_MASK,
                 rn: (insn >> 5) & REGISTER_MASK,
@@ -81,7 +82,7 @@ impl ArmInsn {
             }
         } else if insn & LDR_STR_UNSIGNED_MASK == LDR_STR_UNSIGNED_OPCODE {
             Self::LdrStr {
-                // rt is not used
+                // The target register (rt) is not needed here.
                 rn: (insn >> 5) & REGISTER_MASK,
             }
         } else if Self::is_branch(insn) {
@@ -91,8 +92,8 @@ impl ArmInsn {
         }
     }
 
-    /// Return true if the sequence of instructions starts with ADRP that is subject
-    /// to the erratum. Otherwise, return false.
+    /// Returns true if the instruction sequence begins with an ADRP that could trigger
+    /// erratum 843419.
     fn starts_with_erratum_843419(insns: &[ArmInsn]) -> bool {
         if insns.len() < 3 {
             return false;
@@ -103,8 +104,7 @@ impl ArmInsn {
             return false;
         };
 
-        // 2) A load or store instruction:
-        // ...
+        // 2) The next instruction must not overwrite the ADRP destination register.
         // This must not write to Rn.
         match insns[1] {
             Self::Add { .. } | Self::Adrp { .. } | Self::Branch => return false,
@@ -150,18 +150,18 @@ fn erratum_843419_offsets(data: &[u8]) -> Vec<usize> {
         .collect()
 }
 
-/// Erratum is affected by low 12 bits
+/// The erratum depends on the low 12 bits of the instruction address.
 const ERRATUM_PAGE_SIZE: usize = 4096;
-/// The number instruction position to consider for the erratume.
+/// The number of instruction positions in one erratum page.
 const ERRATUM_INSN_OFFSETS: usize = ERRATUM_PAGE_SIZE / 4;
 
 #[derive(Debug)]
 pub(crate) struct ErratumMask {
-    // Erratum page offsets (expressed in offsets in instructions) that will trigger the erratum.
+    // Section start offsets within a page, in instruction units, that could trigger the erratum.
     pub(crate) mask: FixedBitSet,
-    // Section alignment (in bytes)
+    // Section alignment in bytes.
     pub(crate) alignment: usize,
-    // A necessary padding to move all errata from any given offsets in a final binary (in bytes)
+    // Maximum padding in bytes needed to make any valid section placement safe.
     pub(crate) maximal_padding: usize,
 }
 
@@ -174,7 +174,7 @@ fn erratum_mask_from_offset(
         return Ok(None);
     }
 
-    // Mask has bit set to true if that offset will put any of the erratum offests into the wrong position.
+    // Set a bit for each section start offset that places an affected ADRP at an unsafe page offset.
     let mut mask = FixedBitSet::with_capacity(ERRATUM_INSN_OFFSETS);
     for section_start in 0..ERRATUM_INSN_OFFSETS {
         if erratum_offsets.iter().any(|offset| {
@@ -186,13 +186,13 @@ fn erratum_mask_from_offset(
     }
 
     ensure!(
-        // We know the alignment is a multiple of 4096, so check if we're safe at page boundary.
+        // Alignments of at least 4096 place the section at a page boundary, which must be safe.
         section_alignment < ERRATUM_PAGE_SIZE || !mask[0],
         "cannot fix erratum for a section with large alignment: {section_alignment}"
     );
 
-    // Now for each bit set (bad page offset), calculate how many multiples of an alignment will be needed to fix it
-    // so each erratum will be out of the problematic offests.
+    // For each unsafe, aligned section start offset, find the smallest alignment-multiple
+    // shift that moves all affected ADRP instructions away from unsafe page offsets.
     ensure!(
         section_alignment >= 4,
         "unexpected small alignment: {section_alignment}"
@@ -200,11 +200,10 @@ fn erratum_mask_from_offset(
     let alignment_in_insns = section_alignment / 4;
     let necessary_shifts = mask
         .ones()
-        // Consider only valid section alignments.
+        // Consider only start offsets that satisfy the section alignment.
         .filter(|i| i % alignment_in_insns == 0)
         .map(|i| {
-            // Just try all the possible multiples of a the alignment and check if we reach
-            // a configuration that is safe.
+            // Try each multiple of the alignment within a page until a safe placement is found.
             (0..(ERRATUM_INSN_OFFSETS / alignment_in_insns))
                 .map(|step| step * alignment_in_insns)
                 .find(|step| !mask[(i + *step) % ERRATUM_INSN_OFFSETS])
