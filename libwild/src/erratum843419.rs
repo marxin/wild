@@ -11,7 +11,12 @@
 //! Note the Variant 2 is intentionally excluded as it depends on a dead instruction
 //! (where register of ADRP insn is overwritten by the following one).
 
+use fixedbitset::FixedBitSet;
 use itertools::Itertools;
+
+use crate::Result;
+use crate::ensure;
+use crate::error;
 
 const ADRP_MARK: u32 = 0x9f00_0000;
 const ADRP_OPCODE: u32 = 0x9000_0000;
@@ -131,7 +136,7 @@ impl ArmInsn {
 }
 
 /// Returns byte offsets of all potential erratum sequences in the instruction stream.
-pub(crate) fn erratum_843419_offsets(data: &[u8]) -> Vec<usize> {
+fn erratum_843419_offsets(data: &[u8]) -> Vec<usize> {
     let insns = data
         .as_chunks::<4>()
         .0
@@ -143,4 +148,75 @@ pub(crate) fn erratum_843419_offsets(data: &[u8]) -> Vec<usize> {
         .filter(|&index| ArmInsn::starts_with_erratum_843419(&insns[index..]))
         .map(|index| index * size_of::<u32>())
         .collect()
+}
+
+/// Erratum is affected by low 12 bits
+const ERRATUM_PAGE_SIZE: usize = 4096;
+/// The number instruction position to consider for the erratume.
+const ERRATUM_INSN_OFFSETS: usize = ERRATUM_PAGE_SIZE / 4;
+
+#[derive(Debug)]
+pub(crate) struct ErratumMask {
+    // Erratum page offsets (expressed in offsets in instructions) that will trigger the erratum.
+    pub(crate) mask: FixedBitSet,
+    // Section alignment (in number of instructions)
+    pub(crate) alignment: usize,
+    // A necessary padding to move all errata from any given offsets in a final binary (in bytes)
+    pub(crate) maximal_padding: usize,
+}
+
+pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option<ErratumMask>> {
+    let section_alignment = section_alignment as usize;
+    debug_assert!(section_alignment.is_multiple_of(2));
+    let erratum_offsets = erratum_843419_offsets(data)
+        .into_iter()
+        .map(|offset| (offset % ERRATUM_PAGE_SIZE) / 4)
+        .unique()
+        .collect_vec();
+
+    if erratum_offsets.is_empty() {
+        return Ok(None);
+    }
+    ensure!(
+        section_alignment < ERRATUM_PAGE_SIZE,
+        "cannot fix erratum for a section with large alignment: {section_alignment}"
+    );
+
+    // Mask has bit set to true if that offset will put any of the erratum offests into the wrong position.
+    let mut mask = FixedBitSet::with_capacity(ERRATUM_INSN_OFFSETS);
+    for section_start in 0..ERRATUM_INSN_OFFSETS {
+        if erratum_offsets.iter().any(|offset| {
+            let i = *offset + section_start;
+            i == 0xff8 / 4 || i == 0xffc / 4
+        }) {
+            mask.put(section_start);
+            break;
+        }
+    }
+
+    // Now for each bit set (bad page offset), calculate how many multiples of an alignment will be needed to fix it
+    // so each erratum will be out of the problematic offests.
+    ensure!(
+        section_alignment >= 4,
+        "unexpected small alignment: {section_alignment}"
+    );
+    let alignment_in_insns = section_alignment / 4;
+    let necessary_shifts = mask
+        .ones()
+        .map(|i| {
+            // Just try all the possible multiples of a the alignment and check if we reach
+            // a configuration that is safe.
+            (0..(ERRATUM_INSN_OFFSETS / alignment_in_insns))
+                .map(|step| step * alignment_in_insns)
+                .find(|step| !mask[(i + *step) % ERRATUM_INSN_OFFSETS])
+                .ok_or_else(|| error!("Cannot find a valid offset for an erratum"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let maximal_padding = 4 * necessary_shifts.into_iter().max().unwrap();
+
+    Ok(Some(ErratumMask {
+        alignment: section_alignment,
+        mask,
+        maximal_padding,
+    }))
 }

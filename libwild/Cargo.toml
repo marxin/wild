@@ -22,6 +22,7 @@ colosseum.workspace = true
 crossbeam-queue.workspace = true
 crossbeam-utils.workspace = true
 derive_more.workspace = true
+fixedbitset.workspace = true
 flate2.workspace = true
 foldhash.workspace = true
 gimli.workspace = true

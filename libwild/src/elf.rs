@@ -1147,12 +1147,11 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         if A::arch_identifier() == object::elf::EM_AARCH64 {
             let header = state.object.section(section_index)?;
             let bytes = state.object.section_data_cow(header)?;
+            let alignment = state.object.section_alignment(header)?;
 
-            let offsets = crate::erratum843419::erratum_843419_offsets(&bytes);
-            state.format_specific.erratum_843419_count += offsets.len();
-            if !offsets.is_empty() {
-                tracing::debug!(erratum_843419_count = offsets.len(), section = %state.object.section_display_name(section_index));
-                dbg!(offsets.len());
+            let erratum_mask = crate::erratum843419::erratum_mask(&bytes, alignment)?;
+            if let Some(erratum_mask) = erratum_mask {
+                dbg!((alignment, erratum_mask.maximal_padding));
             }
         }
         Ok(())
