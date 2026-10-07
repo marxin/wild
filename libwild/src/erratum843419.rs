@@ -156,7 +156,7 @@ const ERRATUM_PAGE_SIZE: usize = 4096;
 /// The number of instruction positions in one erratum page.
 const ERRATUM_INSN_OFFSETS: usize = ERRATUM_PAGE_SIZE / INSN_SIZE;
 
-type ErratumBits = BitArray<[u64; ERRATUM_INSN_OFFSETS / u64::BITS as usize]>;
+type ErratumBits = BitArray<[usize; ERRATUM_INSN_OFFSETS / usize::BITS as usize]>;
 
 #[derive(Debug)]
 pub(crate) struct ErratumMask {
