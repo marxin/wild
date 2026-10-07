@@ -162,7 +162,7 @@ type ErratumBits = BitArray<[u64; ERRATUM_INSN_OFFSETS / u64::BITS as usize]>;
 pub(crate) struct ErratumMask {
     // Section start offsets within a page, in instruction units, that could trigger the erratum.
     #[allow(dead_code)]
-    pub(crate) mask: ErratumBits,
+    pub(crate) mask: Box<ErratumBits>,
     // Section alignment in bytes.
     #[allow(dead_code)]
     pub(crate) alignment: usize,
@@ -229,7 +229,7 @@ fn erratum_mask_from_offset(
 
     Ok(Some(ErratumMask {
         alignment: section_alignment,
-        mask,
+        mask: Box::new(mask),
         maximal_padding,
     }))
 }
