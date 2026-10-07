@@ -1143,8 +1143,9 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
     fn analyze_text_section<'data, A: Arch<Platform = Self>>(
         state: &mut layout::ObjectLayoutState<'data, Self>,
         section_index: object::SectionIndex,
+        args: &Self::Args,
     ) -> Result {
-        if A::arch_identifier() == object::elf::EM_AARCH64 {
+        if args.fix_cortex_a53_843419 && A::arch_identifier() == object::elf::EM_AARCH64 {
             let header = state.object.section(section_index)?;
             let bytes = state.object.section_data_cow(header)?;
             let alignment = state.object.section_alignment(header)?;

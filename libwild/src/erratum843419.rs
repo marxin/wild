@@ -143,6 +143,15 @@ fn erratum_843419_offsets(data: &[u8]) -> Vec<usize> {
         .iter()
         .map(|bytes| ArmInsn::from_opcode(u32::from_le_bytes(*bytes)))
         .collect_vec();
+    if insns.len() > 100 {
+        dbg!((
+            insns.len(),
+            insns
+                .iter()
+                .filter(|x| matches!(x, ArmInsn::Adrp { .. }))
+                .count()
+        ));
+    }
 
     (0..insns.len())
         .filter(|&index| ArmInsn::starts_with_erratum_843419(&insns[index..]))

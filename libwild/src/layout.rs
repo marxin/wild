@@ -4677,7 +4677,7 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
         let section = Section::create(header, self, part_id)?;
 
         if header.is_executable() {
-            P::analyze_text_section::<A>(self, section_index)?;
+            P::analyze_text_section::<A>(self, section_index, resources.symbol_db.args)?;
         }
 
         <A::Platform as Platform>::load_object_section_relocations::<A>(

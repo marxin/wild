@@ -647,6 +647,7 @@ pub(crate) trait Platform:
     fn analyze_text_section<'data, A: Arch<Platform = Self>>(
         _state: &mut layout::ObjectLayoutState<'data, Self>,
         _section_index: object::SectionIndex,
+        _args: &Self::Args,
     ) -> Result {
         Ok(())
     }
