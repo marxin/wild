@@ -94,29 +94,28 @@ impl ArmInsn {
 
     /// Returns true if the instruction sequence begins with an ADRP that could trigger
     /// erratum 843419.
-    fn starts_with_erratum_843419(insns: &[ArmInsn]) -> bool {
-        if insns.len() < 3 {
-            return false;
-        }
+    fn starts_with_erratum_843419(insns: &[[u8; 4]]) -> bool {
+        let get_insn = |data| Self::from_opcode(u32::from_le_bytes(data));
 
         // 1) ADRP
-        let ArmInsn::Adrp { rd: register } = insns[0] else {
+        let ArmInsn::Adrp { rd: register } = get_insn(insns[0]) else {
             return false;
         };
 
         // 2) The next instruction must not overwrite the ADRP destination register.
         // This must not write to Rn.
-        match insns[1] {
+        match get_insn(insns[1]) {
             Self::Add { .. } | Self::Adrp { .. } | Self::Branch => return false,
             ArmInsn::Ldr { rt, .. } if rt == register => return false,
             _ => {}
         }
 
+        let third = get_insn(insns[2]);
         // 3) Variant A (optional 3rd instruction)
         if insns.len() >= 4 {
             // This cannot be a branch.
             // This cannot write Rn.
-            match insns[2] {
+            match third {
                 Self::Branch => {}
                 Self::Add { rd, .. } if rd == register => {}
                 Self::Ldr { rt, .. } if rt == register => {}
@@ -124,7 +123,7 @@ impl ArmInsn {
                 _ => {
                     // 4) Load/store register (unsigned immediate)" encoding class, using Rn as the
                     //    base address register.
-                    if Self::is_final_load_store_imm(&insns[3], register) {
+                    if Self::is_final_load_store_imm(&get_insn(insns[3]), register) {
                         return true;
                     }
                 }
@@ -132,20 +131,15 @@ impl ArmInsn {
         }
 
         // 3) Variant B
-        Self::is_final_load_store_imm(&insns[2], register)
+        Self::is_final_load_store_imm(&third, register)
     }
 }
 
 /// Returns byte offsets of all potential erratum sequences in the instruction stream.
-fn erratum_843419_offsets(data: &[u8]) -> SmallVec<[usize; 4]> {
-    let insns = data
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|bytes| ArmInsn::from_opcode(u32::from_le_bytes(*bytes)))
-        .collect_vec();
+fn erratum_843419_offsets(data: &[u8]) -> SmallVec<[usize; 2]> {
+    let insns = data.as_chunks::<4>().0;
 
-    (0..insns.len())
+    (0..insns.len().saturating_sub(2))
         .filter(|&index| ArmInsn::starts_with_erratum_843419(&insns[index..]))
         .map(|index| index * size_of::<u32>())
         .collect()
