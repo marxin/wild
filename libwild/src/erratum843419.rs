@@ -16,7 +16,6 @@ use crate::Result;
 use crate::ensure;
 use crate::error;
 use bitvec::array::BitArray;
-use itertools::Itertools;
 use smallvec::SmallVec;
 
 const INSN_SIZE: usize = 4;
@@ -254,7 +253,7 @@ pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option
     let erratum_offsets: SmallVec<[usize; 4]> = erratum_843419_offsets(data)
         .into_iter()
         .map(|offset| (offset % ERRATUM_PAGE_SIZE) / INSN_SIZE)
-        .unique()
+        // We can use unique, but typically all the values as distinct.
         .collect();
     erratum_mask_from_offset(&erratum_offsets, section_alignment)
 }
