@@ -141,15 +141,15 @@ impl ArmInsn {
 fn erratum_843419_offsets(data: &[u8]) -> SmallVec<[usize; 2]> {
     let insns = data.as_chunks::<INSN_SIZE>().0;
 
-    (0..insns.len().saturating_sub(2))
-        .filter_map(|index| {
-            if ArmInsn::starts_with_erratum_843419(&insns[index..]) {
-                Some(index * INSN_SIZE)
-            } else {
-                None
-            }
-        })
-        .collect()
+    // A busy loop where we intentionally use a plain loop as the Iterator abstraction
+    // is not zero cost.
+    let mut result = SmallVec::new();
+    for index in 0..insns.len().saturating_sub(2) {
+        if ArmInsn::starts_with_erratum_843419(&insns[index..]) {
+            result.push(index * INSN_SIZE);
+        }
+    }
+    result
 }
 
 /// The erratum depends on the low 12 bits of the instruction address.
