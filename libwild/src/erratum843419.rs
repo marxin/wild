@@ -17,6 +17,7 @@ use crate::ensure;
 use crate::error;
 use bitvec::array::BitArray;
 use itertools::Itertools;
+use smallvec::SmallVec;
 
 const ADRP_MARK: u32 = 0x9f00_0000;
 const ADRP_OPCODE: u32 = 0x9000_0000;
@@ -136,22 +137,13 @@ impl ArmInsn {
 }
 
 /// Returns byte offsets of all potential erratum sequences in the instruction stream.
-fn erratum_843419_offsets(data: &[u8]) -> Vec<usize> {
+fn erratum_843419_offsets(data: &[u8]) -> SmallVec<[usize; 4]> {
     let insns = data
         .as_chunks::<4>()
         .0
         .iter()
         .map(|bytes| ArmInsn::from_opcode(u32::from_le_bytes(*bytes)))
         .collect_vec();
-    if insns.len() > 100 {
-        dbg!((
-            insns.len(),
-            insns
-                .iter()
-                .filter(|x| matches!(x, ArmInsn::Adrp { .. }))
-                .count()
-        ));
-    }
 
     (0..insns.len())
         .filter(|&index| ArmInsn::starts_with_erratum_843419(&insns[index..]))
@@ -235,11 +227,11 @@ fn erratum_mask_from_offset(
 
 pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option<ErratumMask>> {
     debug_assert!(section_alignment.is_power_of_two());
-    let erratum_offsets = erratum_843419_offsets(data)
+    let erratum_offsets: SmallVec<[usize; 4]> = erratum_843419_offsets(data)
         .into_iter()
         .map(|offset| (offset % ERRATUM_PAGE_SIZE) / 4)
         .unique()
-        .collect_vec();
+        .collect();
     erratum_mask_from_offset(&erratum_offsets, section_alignment)
 }
 
