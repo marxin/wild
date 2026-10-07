@@ -1376,7 +1376,7 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
     parser
         .declare()
         .long("fix-cortex-a53-843419")
-        .help("Analyze executable sections for Cortex-A53 erratum 843419")
+        .help("Workaround Cortex-A53 erratum 843419")
         .execute(|args, _modifier_stack| {
             args.fix_cortex_a53_843419 = true;
             Ok(())
