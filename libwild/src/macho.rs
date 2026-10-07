@@ -93,6 +93,10 @@ use std::num::NonZeroU64;
 use std::slice::Iter;
 use zerocopy::FromBytes;
 
+// Useful format documents:
+// - https://github.com/aidansteele/osx-abi-macho-file-format-reference
+// - https://alexdremov.me/mystery-of-mach-o-object-file-builders/
+
 #[derive(Debug, Copy, Clone, Default)]
 pub(crate) struct MachO;
 
