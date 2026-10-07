@@ -2546,6 +2546,8 @@ fn write_section_raw<'out, 'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
         let section_info = layout
             .output_sections
             .output_info(part_id.output_section_id::<elf::Elf<C>>());
+        let (leading_padding, out) = out.split_at_mut(sec.leading_padding as usize);
+        fill_section_padding::<C, A>(leading_padding, section_info);
         match relax_deltas {
             None => {
                 let section_size = object.object.section_size(object_section)?;

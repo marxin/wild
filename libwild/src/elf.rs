@@ -1144,6 +1144,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         state: &mut layout::ObjectLayoutState<'data, Self>,
         section_index: object::SectionIndex,
         args: &Self::Args,
+        section: &mut layout::Section,
     ) -> Result {
         if args.fix_cortex_a53_843419 && A::arch_identifier() == object::elf::EM_AARCH64 {
             let header = state.object.section(section_index)?;
@@ -1153,9 +1154,28 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
             let erratum_mask = crate::erratum843419::erratum_mask(&bytes, alignment)?;
             if let Some(erratum_mask) = erratum_mask {
                 tracing::trace!(erratum_mask.maximal_padding, section = %state.object.section_display_name(section_index));
+                section.maximal_padding = u16::try_from(erratum_mask.maximal_padding).unwrap();
+                state
+                    .format_specific
+                    .erratum_masks
+                    .insert(section_index.0, erratum_mask);
             }
         }
         Ok(())
+    }
+
+    fn input_section_padding<'data>(
+        state: &Self::ObjectLayoutStateExt<'data>,
+        section_index: object::SectionIndex,
+        address: u64,
+    ) -> u16 {
+        u16::try_from(
+            state
+                .erratum_masks
+                .get(&section_index.0)
+                .map_or(0, |mask| mask.padding_for_address(address)),
+        )
+        .unwrap()
     }
 
     fn load_object_section_relocations<'data, 'scope, A: Arch<Platform = Self>>(
@@ -4494,6 +4514,9 @@ pub(crate) struct ObjectLayoutStateExt<'data, C: ElfClass> {
     pub(crate) aarch64_build_attributes: Option<AArch64BuildAttributes>,
 
     has_eh_frame_input: bool,
+
+    // A section with an erratum is pretty rare, use HashMap.
+    erratum_masks: HashMap<usize, crate::erratum843419::ErratumMask>,
 
     cies: SmallVec<[CieAtOffset<'data>; 2]>,
 

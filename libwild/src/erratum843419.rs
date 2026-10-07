@@ -161,13 +161,26 @@ type ErratumBits = BitArray<[u64; ERRATUM_INSN_OFFSETS / u64::BITS as usize]>;
 #[derive(Debug)]
 pub(crate) struct ErratumMask {
     // Section start offsets within a page, in instruction units, that could trigger the erratum.
-    #[allow(dead_code)]
     pub(crate) mask: Box<ErratumBits>,
     // Section alignment in bytes.
-    #[allow(dead_code)]
     pub(crate) alignment: usize,
     // Maximum padding in bytes needed to make any valid section placement safe.
     pub(crate) maximal_padding: usize,
+}
+
+impl ErratumMask {
+    pub(crate) fn padding_for_address(&self, address: u64) -> u64 {
+        let offset = (address as usize % ERRATUM_PAGE_SIZE) / 4;
+        // Page-aligned sections were already checked to be safe during analysis.
+        if self.alignment >= ERRATUM_PAGE_SIZE {
+            debug_assert!(!self.mask[offset]);
+            return 0;
+        }
+        let padding = 4 * find_erratum_shift(offset, self.alignment / 4, &self.mask)
+            .expect("erratum mask was checked for a safe placement");
+        debug_assert!(padding <= self.maximal_padding);
+        padding as u64
+    }
 }
 
 /// Returns the smallest alignment-multiple shift to a safe instruction offset.
