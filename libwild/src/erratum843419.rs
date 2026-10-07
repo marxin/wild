@@ -15,7 +15,7 @@
 use crate::Result;
 use crate::ensure;
 use crate::error;
-use fixedbitset::FixedBitSet;
+use bitvec::array::BitArray;
 use itertools::Itertools;
 
 const ADRP_MARK: u32 = 0x9f00_0000;
@@ -155,11 +155,13 @@ const ERRATUM_PAGE_SIZE: usize = 4096;
 /// The number of instruction positions in one erratum page.
 const ERRATUM_INSN_OFFSETS: usize = ERRATUM_PAGE_SIZE / 4;
 
+type ErratumBits = BitArray<[u64; ERRATUM_INSN_OFFSETS / u64::BITS as usize]>;
+
 #[derive(Debug)]
 pub(crate) struct ErratumMask {
     // Section start offsets within a page, in instruction units, that could trigger the erratum.
     #[allow(dead_code)]
-    pub(crate) mask: FixedBitSet,
+    pub(crate) mask: ErratumBits,
     // Section alignment in bytes.
     #[allow(dead_code)]
     pub(crate) alignment: usize,
@@ -178,13 +180,13 @@ fn erratum_mask_from_offset(
 
     // Set a bit for each section start offset that places an affected ADRP at an unsafe page
     // offset.
-    let mut mask = FixedBitSet::with_capacity(ERRATUM_INSN_OFFSETS);
+    let mut mask = ErratumBits::ZERO;
     for section_start in 0..ERRATUM_INSN_OFFSETS {
         if erratum_offsets.iter().any(|offset| {
             let i = (*offset + section_start) % ERRATUM_INSN_OFFSETS;
             i == 0xff8 / 4 || i == 0xffc / 4
         }) {
-            mask.put(section_start);
+            mask.set(section_start, true);
         }
     }
 
@@ -202,7 +204,7 @@ fn erratum_mask_from_offset(
     );
     let alignment_in_insns = section_alignment / 4;
     let necessary_shifts = mask
-        .ones()
+        .iter_ones()
         // Consider only start offsets that satisfy the section alignment.
         .filter(|i| i % alignment_in_insns == 0)
         .map(|i| {
