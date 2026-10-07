@@ -170,6 +170,18 @@ pub(crate) struct ErratumMask {
     pub(crate) maximal_padding: usize,
 }
 
+/// Returns the smallest alignment-multiple shift to a safe instruction offset.
+#[inline]
+fn find_erratum_shift(
+    offset_in_insns: usize,
+    alignment_in_insns: usize,
+    mask: &ErratumBits,
+) -> Option<usize> {
+    (0..(ERRATUM_INSN_OFFSETS / alignment_in_insns))
+        .map(|step| step * alignment_in_insns)
+        .find(|step| !mask[(offset_in_insns + *step) % ERRATUM_INSN_OFFSETS])
+}
+
 fn erratum_mask_from_offset(
     erratum_offsets: &[usize],
     section_alignment: u64,
@@ -209,10 +221,7 @@ fn erratum_mask_from_offset(
         // Consider only start offsets that satisfy the section alignment.
         .filter(|i| i % alignment_in_insns == 0)
         .map(|i| {
-            // Try each multiple of the alignment within a page until a safe placement is found.
-            (0..(ERRATUM_INSN_OFFSETS / alignment_in_insns))
-                .map(|step| step * alignment_in_insns)
-                .find(|step| !mask[(i + *step) % ERRATUM_INSN_OFFSETS])
+            find_erratum_shift(i, alignment_in_insns, &mask)
                 .ok_or_else(|| error!("Cannot find a valid offset for an erratum"))
         })
         .collect::<Result<Vec<_>>>()?;
