@@ -19,6 +19,8 @@ use bitvec::array::BitArray;
 use itertools::Itertools;
 use smallvec::SmallVec;
 
+const INSN_SIZE: usize = 4;
+
 const ADRP_MARK: u32 = 0x9f00_0000;
 const ADRP_OPCODE: u32 = 0x9000_0000;
 // LDR (unsigned offset)
@@ -94,7 +96,7 @@ impl ArmInsn {
 
     /// Returns true if the instruction sequence begins with an ADRP that could trigger
     /// erratum 843419.
-    fn starts_with_erratum_843419(insns: &[[u8; 4]]) -> bool {
+    fn starts_with_erratum_843419(insns: &[[u8; INSN_SIZE]]) -> bool {
         let get_insn = |data| Self::from_opcode(u32::from_le_bytes(data));
 
         // 1) ADRP
@@ -137,18 +139,18 @@ impl ArmInsn {
 
 /// Returns byte offsets of all potential erratum sequences in the instruction stream.
 fn erratum_843419_offsets(data: &[u8]) -> SmallVec<[usize; 2]> {
-    let insns = data.as_chunks::<4>().0;
+    let insns = data.as_chunks::<INSN_SIZE>().0;
 
     (0..insns.len().saturating_sub(2))
         .filter(|&index| ArmInsn::starts_with_erratum_843419(&insns[index..]))
-        .map(|index| index * size_of::<u32>())
+        .map(|index| index * INSN_SIZE)
         .collect()
 }
 
 /// The erratum depends on the low 12 bits of the instruction address.
 const ERRATUM_PAGE_SIZE: usize = 4096;
 /// The number of instruction positions in one erratum page.
-const ERRATUM_INSN_OFFSETS: usize = ERRATUM_PAGE_SIZE / 4;
+const ERRATUM_INSN_OFFSETS: usize = ERRATUM_PAGE_SIZE / INSN_SIZE;
 
 type ErratumBits = BitArray<[u64; ERRATUM_INSN_OFFSETS / u64::BITS as usize]>;
 
@@ -164,14 +166,15 @@ pub(crate) struct ErratumMask {
 
 impl ErratumMask {
     pub(crate) fn padding_for_address(&self, address: u64) -> u64 {
-        let offset = (address as usize % ERRATUM_PAGE_SIZE) / 4;
+        let offset = (address as usize % ERRATUM_PAGE_SIZE) / INSN_SIZE;
         // Page-aligned sections were already checked to be safe during analysis.
         if self.alignment >= ERRATUM_PAGE_SIZE {
             debug_assert!(!self.mask[offset]);
             return 0;
         }
-        let padding = 4 * find_erratum_shift(offset, self.alignment / 4, &self.mask)
-            .expect("erratum mask was checked for a safe placement");
+        let padding = INSN_SIZE
+            * find_erratum_shift(offset, self.alignment / INSN_SIZE, &self.mask)
+                .expect("erratum mask was checked for a safe placement");
         debug_assert!(padding <= self.maximal_padding);
         padding as u64
     }
@@ -204,7 +207,7 @@ fn erratum_mask_from_offset(
     for section_start in 0..ERRATUM_INSN_OFFSETS {
         if erratum_offsets.iter().any(|offset| {
             let i = (*offset + section_start) % ERRATUM_INSN_OFFSETS;
-            i == 0xff8 / 4 || i == 0xffc / 4
+            i == 0xff8 / INSN_SIZE || i == 0xffc / INSN_SIZE
         }) {
             mask.set(section_start, true);
         }
@@ -219,10 +222,10 @@ fn erratum_mask_from_offset(
     // For each unsafe, aligned section start offset, find the smallest alignment-multiple
     // shift that moves all affected ADRP instructions away from unsafe page offsets.
     ensure!(
-        section_alignment >= 4,
+        section_alignment >= INSN_SIZE,
         "unexpected small alignment: {section_alignment}"
     );
-    let alignment_in_insns = section_alignment / 4;
+    let alignment_in_insns = section_alignment / INSN_SIZE;
     let necessary_shifts = mask
         .iter_ones()
         // Consider only start offsets that satisfy the section alignment.
@@ -232,7 +235,7 @@ fn erratum_mask_from_offset(
                 .ok_or_else(|| error!("Cannot find a valid offset for an erratum"))
         })
         .collect::<Result<Vec<_>>>()?;
-    let maximal_padding = 4 * necessary_shifts.into_iter().max().unwrap_or(0);
+    let maximal_padding = INSN_SIZE * necessary_shifts.into_iter().max().unwrap_or(0);
 
     Ok(Some(ErratumMask {
         alignment: section_alignment,
@@ -245,7 +248,7 @@ pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option
     debug_assert!(section_alignment.is_power_of_two());
     let erratum_offsets: SmallVec<[usize; 4]> = erratum_843419_offsets(data)
         .into_iter()
-        .map(|offset| (offset % ERRATUM_PAGE_SIZE) / 4)
+        .map(|offset| (offset % ERRATUM_PAGE_SIZE) / INSN_SIZE)
         .unique()
         .collect();
     erratum_mask_from_offset(&erratum_offsets, section_alignment)
