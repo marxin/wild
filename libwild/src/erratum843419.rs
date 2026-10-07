@@ -142,8 +142,13 @@ fn erratum_843419_offsets(data: &[u8]) -> SmallVec<[usize; 2]> {
     let insns = data.as_chunks::<INSN_SIZE>().0;
 
     (0..insns.len().saturating_sub(2))
-        .filter(|&index| ArmInsn::starts_with_erratum_843419(&insns[index..]))
-        .map(|index| index * INSN_SIZE)
+        .filter_map(|index| {
+            if ArmInsn::starts_with_erratum_843419(&insns[index..]) {
+                Some(index * INSN_SIZE)
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
