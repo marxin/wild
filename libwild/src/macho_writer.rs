@@ -1505,7 +1505,8 @@ fn write_uuid(
 ) -> Result {
     verbose_timing_phase!("Write UUID");
 
-    // Derive the UUID from the entire code signature with a zero UUID, avoiding another full-file hash.
+    // Derive the UUID from the entire code signature with a zero UUID, avoiding another full-file
+    // hash.
     let hash = blake3::hash(code_signature);
     let hashes = &mut code_signature[hashes_offset..];
     let uuid_size = size_of::<u128>();
