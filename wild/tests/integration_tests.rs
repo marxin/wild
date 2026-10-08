@@ -7089,7 +7089,13 @@ fn verify_uuid(obj: &object::File, bytes: &[u8]) -> Result {
         .div_ceil(CS_BLOCK_SIZE)
         .checked_mul(CS_HASH_SIZE)
         .context("Invalid code signature hashes size")?;
-    let hashes_start = bytes
+    let code_signature_end = code_signature_offset
+        .checked_add(usize::try_from(code_signature.datasize.get(e))?)
+        .context("Invalid code signature size")?;
+    let code_signature_data = bytes
+        .get(code_signature_offset..code_signature_end)
+        .context("Invalid code signature range")?;
+    let hashes_start = code_signature_data
         .len()
         .checked_sub(hashes_size)
         .context("Invalid code signature hashes range")?;
@@ -7101,11 +7107,11 @@ fn verify_uuid(obj: &object::File, bytes: &[u8]) -> Result {
         .flat_map(Sha256::digest)
         .collect_vec();
     ensure!(
-        bytes[hashes_start..] == final_hashes,
+        code_signature_data[hashes_start..] == final_hashes,
         "Code signature hashes do not match final signed data"
     );
 
-    // Our UUID hash is based on the signature data (with zeroed UUID in the LC_UUID).
+    // Our UUID hash includes the entire signature, with page hashes for a zeroed LC_UUID.
     let mut zero_uuid_data = signed_data.to_vec();
     zero_uuid_data
         .get_mut(uuid_start..uuid_end)
@@ -7115,7 +7121,9 @@ fn verify_uuid(obj: &object::File, bytes: &[u8]) -> Result {
         .chunks(CS_BLOCK_SIZE)
         .flat_map(Sha256::digest)
         .collect_vec();
-    let expected_hash = blake3::hash(&zero_uuid_hashes);
+    let mut zero_uuid_signature = code_signature_data.to_vec();
+    zero_uuid_signature[hashes_start..].copy_from_slice(&zero_uuid_hashes);
+    let expected_hash = blake3::hash(&zero_uuid_signature);
 
     let mut expected_uuid = [0; _];
     expected_uuid.copy_from_slice(&expected_hash.as_bytes()[..uuid_size]);

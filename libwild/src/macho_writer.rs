@@ -1497,11 +1497,17 @@ fn clear_uuid(
     bail!("Missing LC_UUID");
 }
 
-fn write_uuid(signed_data: &mut [u8], hashes: &mut [u8], uuid_offset: usize) -> Result {
+fn write_uuid(
+    signed_data: &mut [u8],
+    code_signature: &mut [u8],
+    hashes_offset: usize,
+    uuid_offset: usize,
+) -> Result {
     verbose_timing_phase!("Write UUID");
 
-    // Derive the UUID from the page hashes with a zero UUID, avoiding another full-file hash.
-    let hash = blake3::hash(hashes);
+    // Derive the UUID from the entire code signature with a zero UUID, avoiding another full-file hash.
+    let hash = blake3::hash(code_signature);
+    let hashes = &mut code_signature[hashes_offset..];
     let uuid_size = size_of::<u128>();
     let uuid_end = uuid_offset + uuid_size;
     let uuid = signed_data
@@ -1606,12 +1612,15 @@ fn write_code_signature_hashes(
         .split_at_mut(code_signature_section.file_offset);
     let hashes_offset =
         (CS_HEADERS_SIZE + code_signature_padded_identifier_size(layout.args())) as usize;
+    let code_signature = code_signature
+        .get_mut(..code_signature_section.file_size)
+        .context("Invalid CODE_SIGNATURE allocation")?;
     let hashes = code_signature
-        .get_mut(hashes_offset..code_signature_section.file_size)
+        .get_mut(hashes_offset..)
         .context("Invalid CODE_SIGNATURE allocation")?;
 
     hashes.copy_from_slice(&calculated_hashes);
-    write_uuid(signed_data, hashes, uuid_offset)?;
+    write_uuid(signed_data, code_signature, hashes_offset, uuid_offset)?;
 
     // Match lld's workaround for the macOS kernel caching signature-verification
     // data before the final code signature has been written:
