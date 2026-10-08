@@ -98,6 +98,11 @@ impl ArmInsn {
     fn starts_with_erratum_843419(insns: &[[u8; INSN_SIZE]]) -> bool {
         let get_insn = |data| Self::from_opcode(u32::from_le_bytes(data));
 
+        // Apparently the following `let Adrp` is not optimized so ideally as the following check!
+        if (u32::from_le_bytes(insns[0])) & ADRP_MARK != ADRP_OPCODE {
+            return false;
+        }
+
         // 1) ADRP
         let ArmInsn::Adrp { rd: register } = get_insn(insns[0]) else {
             return false;
