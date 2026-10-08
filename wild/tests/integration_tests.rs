@@ -411,6 +411,8 @@ use object::read::macho::Segment;
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -7091,22 +7093,31 @@ fn verify_uuid(obj: &object::File, bytes: &[u8]) -> Result {
         .len()
         .checked_sub(hashes_size)
         .context("Invalid code signature hashes range")?;
-    let zero_hashes = vec![0; hashes_size];
-
+    let signed_data = bytes
+        .get(..code_signature_offset)
+        .context("Invalid code signature offset")?;
+    let final_hashes = signed_data
+        .chunks(CS_BLOCK_SIZE)
+        .flat_map(Sha256::digest)
+        .collect_vec();
     ensure!(
-        uuid_end <= hashes_start,
-        "UUID range {uuid_start:#x}..{uuid_end:#x} overlaps code signature hashes \
-        starting at {hashes_start:#x}"
+        bytes[hashes_start..] == final_hashes,
+        "Code signature hashes do not match final signed data"
     );
 
-    let expected_hash = blake3::Hasher::new()
-        .update(&bytes[..uuid_start])
-        .update(&[0; 16])
-        .update_rayon(&bytes[uuid_end..hashes_start])
-        .update(&zero_hashes)
-        .finalize();
+    // Our UUID hash is based on the signature data (with zeroed UUID in the LC_UUID).
+    let mut zero_uuid_data = signed_data.to_vec();
+    zero_uuid_data
+        .get_mut(uuid_start..uuid_end)
+        .context("UUID range overlaps code signature")?
+        .fill(0);
+    let zero_uuid_hashes = zero_uuid_data
+        .chunks(CS_BLOCK_SIZE)
+        .flat_map(Sha256::digest)
+        .collect_vec();
+    let expected_hash = blake3::hash(&zero_uuid_hashes);
 
-    let mut expected_uuid = [0; 16];
+    let mut expected_uuid = [0; _];
     expected_uuid.copy_from_slice(&expected_hash.as_bytes()[..uuid_size]);
     expected_uuid[6] = (expected_uuid[6] & 0x0f) | 0x30;
     expected_uuid[8] = (expected_uuid[8] & 0x3f) | 0x80;

@@ -2120,6 +2120,7 @@ dependencies = [
  "regex",
  "serde",
  "serde-keyvalue",
+ "sha2",
  "strum",
  "tempfile",
  "toml",
