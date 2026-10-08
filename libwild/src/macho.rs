@@ -93,6 +93,10 @@ use std::num::NonZeroU64;
 use std::slice::Iter;
 use zerocopy::FromBytes;
 
+// Useful format documents:
+// - https://github.com/aidansteele/osx-abi-macho-file-format-reference
+// - https://alexdremov.me/mystery-of-mach-o-object-file-builders/
+
 #[derive(Debug, Copy, Clone, Default)]
 pub(crate) struct MachO;
 
@@ -151,6 +155,8 @@ pub(crate) mod output_section_id {
     use super::SinglePartSectionId;
     use crate::output_section_id::OutputSectionId;
 
+    pub(crate) const COMMON: OutputSectionId =
+        crate::output_section_id::regular_section_base::<super::MachO>();
     pub(crate) const STRTAB: OutputSectionId = SinglePartSectionId::Strtab.output_section_id();
     pub(crate) const GOT: OutputSectionId = SinglePartSectionId::Got.output_section_id();
     pub(crate) const PLT_GOT: OutputSectionId = SinglePartSectionId::PltGot.output_section_id();
@@ -215,6 +221,7 @@ pub(crate) type SectionEntry = object::macho::Section64<Endianness>;
 pub(crate) type EntryPointCommand = object::macho::EntryPointCommand<Endianness>;
 pub(crate) type DylinkerCommand = object::macho::DylinkerCommand<Endianness>;
 pub(crate) type DylibCommand = object::macho::DylibCommand<Endianness>;
+pub(crate) type RpathCommand = object::macho::RpathCommand<Endianness>;
 pub(crate) type CodeSignatureCommand = object::macho::LinkeditDataCommand<Endianness>;
 pub(crate) type DyldChainedFixupsCommand = object::macho::LinkeditDataCommand<Endianness>;
 pub(crate) type ChainedFixupsHeader = object::macho::DyldChainedFixupsHeader<Endianness>;
@@ -256,6 +263,10 @@ const MAXPATHLEN: usize = 1024;
 
 pub(crate) fn load_dylib_command_size(path: &[u8]) -> usize {
     (size_of::<DylibCommand>() + path.len() + 1).next_multiple_of(MACHO_COMMAND_ALIGNMENT)
+}
+
+pub(crate) fn rpath_command_size(path: &[u8]) -> usize {
+    (size_of::<RpathCommand>() + path.len() + 1).next_multiple_of(MACHO_COMMAND_ALIGNMENT)
 }
 
 // TODO: promote to object crate
@@ -421,7 +432,12 @@ pub(crate) struct File<'data> {
 #[derive(Debug)]
 enum ObjectKind<'data> {
     Regular(RegularObject<'data>),
-    Dylib,
+    Dylib(Dylib<'data>),
+}
+
+#[derive(Debug)]
+struct Dylib<'data> {
+    install_name: &'data [u8],
 }
 
 #[derive(derive_more::Debug)]
@@ -439,11 +455,21 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
 
         let mut symbols = None;
         let mut sections = None;
+        let mut dylib = None;
 
         while let Some(command) = commands.next()? {
             if let Some(symtab_command) = command.symtab()? {
                 ensure!(symbols.is_none(), "At most one symtab command expected");
                 symbols = Some(symtab_command.symbols::<macho::MachHeader64<_>, _>(LE, input)?);
+            } else if is_dynamic && command.cmd() == macho::LC_ID_DYLIB {
+                ensure!(dylib.is_none(), "Duplicate LC_ID_DYLIB command");
+                let id = command.data::<macho::DylibCommand<Endianness>>()?;
+
+                dylib = Some(Dylib {
+                    install_name: command
+                        .string(LE, id.dylib.name)
+                        .context("Invalid LC_ID_DYLIB install name")?,
+                });
             } else if !is_dynamic
                 && let Some((segment_command, segment_data)) = command.segment_64()?
             {
@@ -454,7 +480,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         }
 
         let kind = if is_dynamic {
-            ObjectKind::Dylib
+            ObjectKind::Dylib(dylib.context("Missing LC_ID_DYLIB command")?)
         } else {
             ObjectKind::Regular(RegularObject {
                 sections: sections.ok_or("Missing segment command")?,
@@ -475,7 +501,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn is_dynamic(&self) -> bool {
-        matches!(self.kind, ObjectKind::Dylib)
+        matches!(self.kind, ObjectKind::Dylib(_))
     }
 
     fn num_symbols(&self) -> usize {
@@ -659,7 +685,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     fn dynamic_tag_values(&self) -> Option<DynamicTagValues<'data>> {
         match self.kind {
             ObjectKind::Regular(_) => None,
-            ObjectKind::Dylib => Some(DynamicTagValues::default()),
+            ObjectKind::Dylib(_) => Some(DynamicTagValues::default()),
         }
     }
 
@@ -807,8 +833,18 @@ impl platform::SectionFlags for SectionFlags {
 // Documentation link for Nlist64 type: https://leopard-adc.pepas.com/documentation/DeveloperTools/Conceptual/MachORuntime/Reference/reference.html
 impl platform::Symbol for SymtabEntry {
     fn as_common(&self) -> Option<platform::CommonSymbol> {
-        // TODO
-        None
+        if !Nlist::is_common(self) {
+            return None;
+        }
+
+        // Common symbols store their size in n_value.
+        let alignment = Alignment {
+            exponent: self.n_desc.get(LE).common_alignment(),
+        };
+        Some(platform::CommonSymbol {
+            size: alignment.align_up(self.n_value.get(LE)),
+            part_id: output_section_id::COMMON.part_id_with_alignment::<MachO>(alignment),
+        })
     }
 
     fn is_undefined(&self) -> bool {
@@ -840,8 +876,11 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn size(&self) -> u64 {
-        // TODO
-        0
+        if Nlist::is_common(self) {
+            self.value()
+        } else {
+            0
+        }
     }
 
     fn has_name(&self) -> bool {
@@ -1140,8 +1179,10 @@ impl<'data> platform::VerneedTable<'data> for VerneedTable<'data> {
 }
 
 impl platform::Platform for MachO {
+    const WEAK_SYMBOLS_OVERRIDE_COMMON: bool = true;
+
     const NUM_SINGLE_PART_SECTIONS: u32 = SinglePartSectionId::Count as u32;
-    const NUM_BUILT_IN_REGULAR_SECTIONS: usize = 0;
+    const NUM_BUILT_IN_REGULAR_SECTIONS: usize = 1;
 
     // The macOS kernel caches code signature state by vnode. Reusing a previously executed output's
     // inode after changing its contents can therefore cause the new executable to SIGKILL, even
@@ -2058,8 +2099,10 @@ impl platform::Platform for MachO {
             prelude.format_specific.load_command_count += 1;
         };
 
-        // Separately emitted __PAGEZERO.
-        allocate_load_cmd(size_of::<SegmentCommand>());
+        // Executables have a separately emitted __PAGEZERO.
+        if resources.symbol_db.output_kind.is_executable() {
+            allocate_load_cmd(size_of::<SegmentCommand>());
+        }
 
         for &segment_id in &header_info.active_segment_ids {
             let segment = program_segments.segment_def(segment_id);
@@ -2072,11 +2115,13 @@ impl platform::Platform for MachO {
 
         if resources.symbol_db.output_kind.is_executable() {
             allocate_load_cmd(size_of::<EntryPointCommand>());
+            allocate_load_cmd(
+                (size_of::<DylinkerCommand>() + DYLINKER_PATH.len())
+                    .next_multiple_of(MACHO_COMMAND_ALIGNMENT),
+            );
+        } else {
+            allocate_load_cmd(load_dylib_command_size(args.dylib_install_name()));
         }
-        allocate_load_cmd(
-            (size_of::<DylinkerCommand>() + DYLINKER_PATH.len())
-                .next_multiple_of(MACHO_COMMAND_ALIGNMENT),
-        );
 
         prelude.format_specific.imported_library_file_ids =
             resources.format_specific.imported_libraries.clone();
@@ -2091,6 +2136,9 @@ impl platform::Platform for MachO {
         for command_size in load_dylib_command_sizes {
             allocate_load_cmd(command_size);
         }
+        for rpath in &args.rpaths {
+            allocate_load_cmd(rpath_command_size(rpath.as_bytes()));
+        }
 
         allocate_load_cmd(size_of::<DyldChainedFixupsCommand>());
         if resources.symbol_db.output_kind.needs_dynsym() {
@@ -2104,8 +2152,11 @@ impl platform::Platform for MachO {
         }
 
         if args.headerpad_max_install_names {
-            let extra_string_space =
-                prelude.format_specific.imported_library_file_ids.len() * MAXPATHLEN;
+            let extra_string_space = (prelude.format_specific.imported_library_file_ids.len()
+                + args.rpaths.len()
+                + usize::from(resources.symbol_db.output_kind.is_shared_object()))
+                * MAXPATHLEN;
+
             sizes.increment(part_id::LOAD_COMMANDS_PADDING, extra_string_space as u64);
         }
     }
@@ -2344,6 +2395,7 @@ impl platform::Platform for MachO {
             if segment == SegmentName::DATA {
                 add_sections_in_segment(&mut builder, output_sections, &custom.tdata, segment);
                 add_sections_in_segment(&mut builder, output_sections, &custom.tbss, segment);
+                builder.add_section(output_section_id::COMMON);
             }
             add_sections_in_segment(&mut builder, output_sections, &custom.bss, segment);
         }
@@ -2464,12 +2516,15 @@ pub(crate) fn install_name<'data>(
     symbol_db: &crate::symbol_db::SymbolDb<'data, MachO>,
 ) -> &'data [u8] {
     match symbol_db.file(file_id) {
-        SequencedInput::StubLibrary(stub) => stub.defined_symbols.install_name.as_bytes(),
-        SequencedInput::Object(obj) => obj.parsed.input.lib_name(),
-        _ => {
-            panic!("Internal error: Expected StubLibrary or Dynamic");
-        }
+        SequencedInput::StubLibrary(stub) => return stub.defined_symbols.install_name.as_bytes(),
+        SequencedInput::Object(obj) => match &obj.parsed.object.kind {
+            ObjectKind::Dylib(dylib) => return dylib.install_name,
+            ObjectKind::Regular(_) => {}
+        },
+        _ => {}
     }
+
+    panic!("Internal error: Expected StubLibrary or Dylib");
 }
 
 fn create_dynamic_layout_ext<'data>(
@@ -2543,6 +2598,14 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
         min_alignment: Alignment {
             exponent: CS_SECTION_ALIGNMENT_EXP,
         },
+        ..DEFAULT_DEFS
+    };
+    defs[output_section_id::COMMON.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionIdentity::new(
+            SectionName(b"__common"),
+            Some(SegmentName::DATA),
+        )),
+        section_flags: S_ZEROFILL.to_flags(),
         ..DEFAULT_DEFS
     };
     defs[output_section_id::GOT.as_usize()] = BuiltInSectionDetails {
@@ -2932,7 +2995,7 @@ impl<'data> ObjectKind<'data> {
     fn sections(&self) -> &'data [SectionHeader] {
         match self {
             ObjectKind::Regular(regular_object) => regular_object.sections,
-            ObjectKind::Dylib => &[],
+            ObjectKind::Dylib(_) => &[],
         }
     }
 }

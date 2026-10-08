@@ -30,6 +30,7 @@ use crate::wasm::demangle_symbol_name;
 use crate::wasm::output_data_has_passive;
 use crate::wasm::output_data_segment_count;
 use crate::wasm::output_section_id;
+use crate::wasm::reject_tls_template_reloc;
 use crate::wasm::relocation_type_to_string;
 use crate::wasm::section_id;
 use crate::wasm::wasm_symbol_name_str;
@@ -184,6 +185,7 @@ fn apply_section_reloc(
     function_table_slots: &[u32],
     memory_base: u32,
     tls_base: u32,
+    in_tls_template: bool,
     buf: &mut [u8],
 ) -> Result<()> {
     let mut reloc = *reloc;
@@ -191,6 +193,9 @@ fn apply_section_reloc(
         .offset
         .checked_sub(local_base)
         .context("Wasm relocation offset is before the body or payload start")?;
+    if in_tls_template {
+        reject_tls_template_reloc(index_map, &reloc)?;
+    }
     apply_resolved_reloc(
         index_map,
         &reloc,
@@ -284,6 +289,10 @@ fn write_metadata_sections(
     copy_encoded_section(
         encoded.data_count.as_ref(),
         section_buffers.get_mut(output_section_id::WASM_DATA_COUNT),
+    )?;
+    copy_encoded_section(
+        encoded.start.as_ref(),
+        section_buffers.get_mut(output_section_id::WASM_START),
     )?;
     copy_encoded_section(
         encoded.name.as_ref(),
@@ -407,6 +416,7 @@ fn write_code_section(wasm_layout: &WasmLayout<'_>, out: &mut [u8]) -> Result<()
                         function_table_slots,
                         memory_base,
                         tls_base,
+                        false,
                         body_bytes,
                     )?;
                 }
@@ -556,6 +566,7 @@ fn write_data_segment(
             function_table_slots,
             memory_base,
             tls_base,
+            segment.tls_template,
             payload,
         )?;
     }
@@ -785,6 +796,7 @@ pub(crate) struct EncodedMetadata {
     table: Option<Vec<u8>>,
     element: Option<Vec<u8>>,
     data_count: Option<Vec<u8>>,
+    start: Option<Vec<u8>>,
     name: Option<Vec<u8>>,
     target_features: Option<Vec<u8>>,
 }
@@ -831,6 +843,7 @@ impl EncodedMetadata {
             crate::wasm::part_id::WASM_DATA_COUNT,
             self.data_count.as_ref(),
         );
+        add_encoded_section_size(sizes, crate::wasm::part_id::WASM_START, self.start.as_ref());
         add_encoded_section_size(sizes, crate::wasm::part_id::WASM_NAME, self.name.as_ref());
         add_encoded_section_size(
             sizes,
@@ -944,6 +957,12 @@ pub(crate) fn encode_metadata_sections(layout: &WasmLayout<'_>) -> Result<Encode
         }
     }
 
+    if let Some(function_index) = layout.start_function {
+        encoded.start = Some(encode_wasm_section(&wasm_encoder::StartSection {
+            function_index,
+        }));
+    }
+
     Ok(encoded)
 }
 
@@ -1000,6 +1019,12 @@ fn build_name_section(layout: &WasmLayout<'_>) -> Option<NameSection> {
     if let Some(idx) = names.tls_base_global {
         set_name_first_wins(&mut global_names, idx, "__tls_base");
     }
+    if let Some(idx) = names.tls_size_global {
+        set_name_first_wins(&mut global_names, idx, "__tls_size");
+    }
+    if let Some(idx) = names.tls_align_global {
+        set_name_first_wins(&mut global_names, idx, "__tls_align");
+    }
     for &(known, idx) in &names.data_address_globals {
         set_name_first_wins(&mut global_names, idx, <&str>::from(known));
     }
@@ -1040,6 +1065,12 @@ fn build_name_section(layout: &WasmLayout<'_>) -> Option<NameSection> {
     }
     if let Some(idx) = names.call_ctors_func {
         set_name_first_wins(&mut function_names, idx, "__wasm_call_ctors");
+    }
+    if let Some(idx) = names.init_tls_func {
+        set_name_first_wins(&mut function_names, idx, "__wasm_init_tls");
+    }
+    if let Some(idx) = names.init_memory_func {
+        set_name_first_wins(&mut function_names, idx, "__wasm_init_memory");
     }
 
     let per_object_names: Vec<ObjectNameEntries<'_>> = layout

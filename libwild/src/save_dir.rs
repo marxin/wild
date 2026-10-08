@@ -210,7 +210,11 @@ impl SaveDirState {
         let mut original_output_file = None;
 
         while let Some(arg) = args.next() {
-            if let Some(args_path) = arg.strip_prefix("@") {
+            // Response files were already read when the arguments were parsed, so an `@` argument
+            // that isn't a file is an option value, e.g. `-rpath @loader_path/../lib`.
+            if let Some(args_path) = arg.strip_prefix("@")
+                && Path::new(args_path).is_file()
+            {
                 let args_from_file = crate::args::read_args_from_file(Path::new(args_path))?;
 
                 if is_rsp_file {
