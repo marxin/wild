@@ -44,6 +44,22 @@ enum ArmInsn {
     Unrecognized,
 }
 
+enum ErratumVariant {
+    // Sequence 1 with 4 instructions
+    Sequence1A,
+    // Sequence 1 with 3 instructions
+    Sequence1B,
+}
+
+impl ErratumVariant {
+    fn instruction_count(&self) -> usize {
+        match self {
+            Self::Sequence1A => 4,
+            Self::Sequence1B => 3,
+        }
+    }
+}
+
 impl ArmInsn {
     fn is_final_load_store_imm(insn: &ArmInsn, register: u32) -> bool {
         match insn {
@@ -95,24 +111,24 @@ impl ArmInsn {
 
     /// Returns true if the instruction sequence begins with an ADRP that could trigger
     /// erratum 843419.
-    fn starts_with_erratum_843419(insns: &[[u8; INSN_SIZE]]) -> bool {
+    fn starts_with_erratum_843419(insns: &[[u8; INSN_SIZE]]) -> Option<ErratumVariant> {
         let get_insn = |data| Self::from_opcode(u32::from_le_bytes(data));
 
         // Apparently the following `let Adrp` is not optimized so ideally as the following check!
         if (u32::from_le_bytes(insns[0])) & ADRP_MARK != ADRP_OPCODE {
-            return false;
+            return None;
         }
 
         // 1) ADRP
         let ArmInsn::Adrp { rd: register } = get_insn(insns[0]) else {
-            return false;
+            return None;
         };
 
         // 2) The next instruction must not overwrite the ADRP destination register.
         // This must not write to Rn.
         match get_insn(insns[1]) {
-            Self::Add { .. } | Self::Adrp { .. } | Self::Branch => return false,
-            ArmInsn::Ldr { rt, .. } if rt == register => return false,
+            Self::Add { .. } | Self::Adrp { .. } | Self::Branch => return None,
+            ArmInsn::Ldr { rt, .. } if rt == register => return None,
             _ => {}
         }
 
@@ -130,7 +146,7 @@ impl ArmInsn {
                     // 4) Load/store register (unsigned immediate)" encoding class, using Rn as the
                     //    base address register.
                     if Self::is_final_load_store_imm(&get_insn(insns[3]), register) {
-                        return true;
+                        return Some(ErratumVariant::Sequence1A);
                     }
                 }
             }
@@ -138,6 +154,8 @@ impl ArmInsn {
 
         // 3) Variant B
         Self::is_final_load_store_imm(&third, register)
+            .then_some(ErratumVariant::Sequence1B)
+            .or(None)
     }
 }
 
@@ -149,7 +167,7 @@ fn erratum_843419_offsets(data: &[u8]) -> SmallVec<[usize; 2]> {
     // is not zero cost.
     let mut result = SmallVec::new();
     for index in 0..insns.len().saturating_sub(2) {
-        if ArmInsn::starts_with_erratum_843419(&insns[index..]) {
+        if ArmInsn::starts_with_erratum_843419(&insns[index..]).is_some() {
             result.push(index * INSN_SIZE);
         }
     }
