@@ -6,8 +6,8 @@
 //! instruction as a base register, or which uses a base register written by an instruction
 //! immediately after an ADRP to the same register, might access an incorrect address.
 //!
-//! Workaround: Prevent affected sequences from crossing a 4 KiB page boundary by keeping
-//! the ADRP away from page offsets 0xFF8 and 0xFFC.
+//! Workaround: Replace the final load/store in an affected sequence with a branch to a veneer
+//! that executes the load/store and branches back. Keep preceding PC-relative instructions in place.
 //!
 //! Variant 2 is intentionally excluded because it involves a dead ADRP instruction:
 //! where the following instruction overwrites its destination register.
@@ -22,6 +22,8 @@ use hashbrown::HashMap;
 use smallvec::SmallVec;
 
 const INSN_SIZE: usize = 4;
+// The final load/store followed by a branch back to the original instruction stream.
+const VENEER_SIZE: usize = 2 * INSN_SIZE;
 
 const ADRP_MARK: u32 = 0x9f00_0000;
 const ADRP_OPCODE: u32 = 0x9000_0000;
@@ -222,20 +224,12 @@ fn erratum_mask_from_offset(
     // Take the worst case over every instruction-aligned page-relative section start,
     // independently of the section's alignment or its eventual placement.
     for section_start in 0..ERRATUM_INSN_OFFSETS {
-        // Reserve a branch over the veneer slots for sections that fall through, like .init/.fini.
-        let mut tail = aligned_section_size / INSN_SIZE + 1;
-        for (variant, _) in erratum_offsets
+        let veneer_count = erratum_offsets
             .iter()
             .filter(|(_, offset)| !is_safe_adrp_offset(*offset / INSN_SIZE + section_start))
-        {
-            while !is_safe_adrp_offset(section_start + tail) {
-                // Keep the relocated ADRP away from unsafe page offsets, including for later stubs.
-                tail += 1;
-            }
-            tail += variant.instruction_count() + 1;
-        }
-        // Include the bytes needed to align the skip branch, as well as the branch and veneers.
-        let padding = alignment_padding + (tail * INSN_SIZE - aligned_section_size);
+            .count();
+        // Reserve a branch over the veneer slots for sections that fall through, like .init/.fini.
+        let padding = alignment_padding + INSN_SIZE + veneer_count * VENEER_SIZE;
         maximal_padding = maximal_padding.max(padding);
     }
 
@@ -260,7 +254,7 @@ struct SectionMappingRange {
     content: MappingSymbol,
 }
 
-/// Copies affected sequences into reserved tail slots and maps each moved instruction's address.
+/// Copies each affected sequence's final load/store into a tail slot and maps its moved address.
 pub(crate) fn patch_erratum_sequences<C: ElfClass>(
     out: &mut [u8],
     section_size: usize,
@@ -313,33 +307,24 @@ pub(crate) fn patch_erratum_sequences<C: ElfClass>(
         if !is_code_range(mapping_symbols.as_ref().unwrap(), offset, size) {
             continue;
         }
-        while !is_safe_adrp_offset((section_address as usize + tail) / INSN_SIZE) {
-            tail += INSN_SIZE;
-        }
         ensure!(
             offset + size <= section_size,
             "Erratum sequence exceeds section size"
         );
         ensure!(
-            tail + size + INSN_SIZE <= out.len(),
+            tail + VENEER_SIZE <= out.len(),
             "Insufficient space for erratum slot"
         );
-        // Copy erratum instructions to the tail slot.
-        out.copy_within(offset..offset + size, tail);
-        for instruction in (0..size).step_by(INSN_SIZE) {
-            mapping.insert(
-                section_address + (offset + instruction) as u64,
-                section_address + (tail + instruction) as u64,
-            );
-        }
-        // Preserve entry points inside the sequence: each original instruction branches to
-        // its corresponding relocated instruction, which executes the remaining suffix.
-        for instruction in (0..size).step_by(INSN_SIZE) {
-            write_branch(out, offset + instruction, tail + instruction)?;
-        }
-        // Branch back to the instruction following the original sequence.
-        write_branch(out, tail + size, offset + size)?;
-        tail += size + INSN_SIZE;
+        // Only the final unsigned-immediate load/store moves
+        let load_store_offset = offset + size - INSN_SIZE;
+        out.copy_within(load_store_offset..load_store_offset + INSN_SIZE, tail);
+        mapping.insert(
+            section_address + load_store_offset as u64,
+            section_address + tail as u64,
+        );
+        write_branch(out, load_store_offset, tail)?;
+        write_branch(out, tail + INSN_SIZE, load_store_offset + INSN_SIZE)?;
+        tail += VENEER_SIZE;
     }
 
     // Fill unused tail padding with NOPs.
