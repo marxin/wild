@@ -13,8 +13,11 @@
 //! where the following instruction overwrites its destination register.
 
 use crate::Result;
+use crate::elf::ElfClass;
+use crate::elf::File;
 use crate::elf_aarch64::MIN_BRANCH_RANGE;
 use crate::ensure;
+use crate::platform::ObjectFile;
 use hashbrown::HashMap;
 use smallvec::SmallVec;
 
@@ -247,14 +250,27 @@ fn erratum_mask_from_offset(
     }))
 }
 
+enum MappingSymbol {
+    Code,
+    Data,
+}
+
+struct SectionMappingRange {
+    offset: u64,
+    content: MappingSymbol,
+}
+
 /// Copies affected sequences into reserved tail slots and maps each moved instruction's address.
-pub(crate) fn patch_erratum_sequences(
+pub(crate) fn patch_erratum_sequences<C: ElfClass>(
     out: &mut [u8],
     section_size: usize,
     section_address: u64,
     offsets: &[ErratumOffset],
+    object: &File<'_, C>,
+    section_index: object::SectionIndex,
 ) -> Result<HashMap<u64, u64>> {
     let mut mapping = HashMap::new();
+    let mut mapping_symbols = None;
     let aligned_section_size = section_size.next_multiple_of(INSN_SIZE);
     ensure!(
         aligned_section_size + INSN_SIZE <= out.len(),
@@ -267,10 +283,39 @@ pub(crate) fn patch_erratum_sequences(
         if is_safe_adrp_offset((section_address as usize + offset) / INSN_SIZE) {
             continue;
         }
+        let size = variant.instruction_count() * INSN_SIZE;
+
+        // Only read the symbol table when we first encounter a sequence that needs patching.
+        // Executable sections can contain data that happens to decode as an erratum sequence.
+        if mapping_symbols.is_none() {
+            let mut symbols = object
+                .symbols
+                .enumerate()
+                .map(|(index, symbol)| -> Result<Option<SectionMappingRange>> {
+                    if object.symbol_section(symbol, index)? != Some(section_index) {
+                        return Ok(None);
+                    }
+                    let content = match object.symbol_name(symbol)? {
+                        b"$x" => MappingSymbol::Code,
+                        b"$d" => MappingSymbol::Data,
+                        _ => return Ok(None),
+                    };
+                    Ok(Some(SectionMappingRange {
+                        offset: object.symbol_offset_in_section(symbol, section_index)?,
+                        content,
+                    }))
+                })
+                .filter_map(Result::transpose)
+                .collect::<Result<Vec<_>>>()?;
+            symbols.sort_unstable_by_key(|range| range.offset);
+            mapping_symbols = Some(symbols);
+        }
+        if !is_code_range(mapping_symbols.as_ref().unwrap(), offset, size) {
+            continue;
+        }
         while !is_safe_adrp_offset((section_address as usize + tail) / INSN_SIZE) {
             tail += INSN_SIZE;
         }
-        let size = variant.instruction_count() * INSN_SIZE;
         ensure!(
             offset + size <= section_size,
             "Erratum sequence exceeds section size"
@@ -303,6 +348,19 @@ pub(crate) fn patch_erratum_sequences(
     }
 
     Ok(mapping)
+}
+
+/// Checks that the entire half-open range is entirely covered by $x mapping symbols, not $d.
+fn is_code_range(mapping_symbols: &[SectionMappingRange], offset: usize, size: usize) -> bool {
+    let offset = offset as u64;
+    let end = offset + size as u64;
+    let index = mapping_symbols.partition_point(|range| range.offset <= offset);
+    index > 0
+        && matches!(mapping_symbols[index - 1].content, MappingSymbol::Code)
+        && mapping_symbols[index..]
+            .iter()
+            .take_while(|range| range.offset < end)
+            .all(|range| matches!(range.content, MappingSymbol::Code))
 }
 
 fn write_branch(out: &mut [u8], from: usize, to: usize) -> Result {

@@ -2605,6 +2605,8 @@ fn write_section_raw<'out, 'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
                 effective_size,
                 address,
                 offsets,
+                object.object,
+                section_index,
             )?;
             Ok((out, instruction_mapping))
         } else {
