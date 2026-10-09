@@ -292,8 +292,8 @@ pub(crate) fn patch_erratum_sequences<C: ElfClass>(
                     let content = match object.symbol_name(symbol)? {
                         b"$x" => MappingSymbol::Code,
                         b"$d" => MappingSymbol::Data,
-                        name if name.starts_with("b$x.".as_bytes()) => MappingSymbol::Code,
-                        name if name.starts_with("b$d.".as_bytes()) => MappingSymbol::Data,
+                        name if name.starts_with(b"$x.") => MappingSymbol::Code,
+                        name if name.starts_with(b"$d.") => MappingSymbol::Data,
                         _ => return Ok(None),
                     };
                     Ok(Some(SectionMappingRange {
