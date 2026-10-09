@@ -144,6 +144,12 @@ impl ArmInsn {
         }
 
         let third = get_insn(insns[2]);
+
+        // 3) Variant B
+        if Self::is_final_load_store_imm(&third, register) {
+            return Some(ErratumVariant::Sequence1B);
+        }
+
         // 3) Variant A (optional 3rd instruction)
         if insns.len() >= 4 {
             // This cannot be a branch.
@@ -163,10 +169,7 @@ impl ArmInsn {
             }
         }
 
-        // 3) Variant B
-        Self::is_final_load_store_imm(&third, register)
-            .then_some(ErratumVariant::Sequence1B)
-            .or(None)
+        None
     }
 }
 
