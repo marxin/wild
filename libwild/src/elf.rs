@@ -11,6 +11,8 @@ use crate::bail;
 use crate::debug_assert_bail;
 use crate::elf_writer;
 use crate::ensure;
+use crate::erratum843419::ErratumOffset;
+use crate::erratum843419::erratum_section_info;
 use crate::error::Context as _;
 use crate::error::Result;
 use crate::expression_eval;
@@ -1151,31 +1153,25 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
             let bytes = state.object.section_data_cow(header)?;
             let alignment = state.object.section_alignment(header)?;
 
-            let erratum_mask = crate::erratum843419::erratum_mask(&bytes, alignment)?;
-            if let Some(erratum_mask) = erratum_mask {
-                tracing::trace!(erratum_mask.maximal_padding, section = %state.object.section_display_name(section_index));
-                section.maximal_padding = u16::try_from(erratum_mask.maximal_padding).unwrap();
+            let erratum_info = erratum_section_info(&bytes, alignment)?;
+            if let Some(erratum_info) = erratum_info {
+                tracing::trace!(erratum_info.maximal_padding, section = %state.object.section_display_name(section_index));
+                section.maximal_padding = u16::try_from(erratum_info.maximal_padding).unwrap();
                 state
                     .format_specific
-                    .erratum_masks
-                    .insert(section_index.0, erratum_mask);
+                    .erratum_offsets
+                    .insert(section_index.0, erratum_info.offsets);
             }
         }
         Ok(())
     }
 
     fn input_section_padding<'data>(
-        state: &Self::ObjectLayoutStateExt<'data>,
-        section_index: object::SectionIndex,
-        address: u64,
+        _state: &Self::ObjectLayoutStateExt<'data>,
+        _section_index: object::SectionIndex,
+        _address: u64,
     ) -> u16 {
-        u16::try_from(
-            state
-                .erratum_masks
-                .get(&section_index.0)
-                .map_or(0, |mask| mask.padding_for_address(address)),
-        )
-        .unwrap()
+        0
     }
 
     fn load_object_section_relocations<'data, 'scope, A: Arch<Platform = Self>>(
@@ -4593,7 +4589,7 @@ pub(crate) struct ObjectLayoutStateExt<'data, C: ElfClass> {
     has_eh_frame_input: bool,
 
     // A section with an erratum is pretty rare, use HashMap.
-    erratum_masks: HashMap<usize, crate::erratum843419::ErratumMask>,
+    pub(crate) erratum_offsets: HashMap<usize, SmallVec<[ErratumOffset; 2]>>,
 
     cies: SmallVec<[CieAtOffset<'data>; 2]>,
 

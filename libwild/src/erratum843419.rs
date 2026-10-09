@@ -14,8 +14,6 @@
 
 use crate::Result;
 use crate::ensure;
-use crate::error;
-use bitvec::array::BitArray;
 use smallvec::SmallVec;
 
 const INSN_SIZE: usize = 4;
@@ -44,12 +42,16 @@ enum ArmInsn {
     Unrecognized,
 }
 
-enum ErratumVariant {
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ErratumVariant {
     // Sequence 1 with 4 instructions
     Sequence1A,
     // Sequence 1 with 3 instructions
     Sequence1B,
 }
+
+/// An erratum variant and its section-relative ADRP byte offset.
+pub(crate) type ErratumOffset = (ErratumVariant, usize);
 
 impl ErratumVariant {
     fn instruction_count(&self) -> usize {
@@ -160,15 +162,15 @@ impl ArmInsn {
 }
 
 /// Returns byte offsets of all potential erratum sequences in the instruction stream.
-fn erratum_843419_offsets(data: &[u8]) -> SmallVec<[usize; 2]> {
+pub(crate) fn erratum_843419_offsets(data: &[u8]) -> SmallVec<[ErratumOffset; 2]> {
     let insns = data.as_chunks::<INSN_SIZE>().0;
 
     // A busy loop where we intentionally use a plain loop as the Iterator abstraction
     // is not zero cost.
     let mut result = SmallVec::new();
     for index in 0..insns.len().saturating_sub(2) {
-        if ArmInsn::starts_with_erratum_843419(&insns[index..]).is_some() {
-            result.push(index * INSN_SIZE);
+        if let Some(variant) = ArmInsn::starts_with_erratum_843419(&insns[index..]) {
+            result.push((variant, index * INSN_SIZE));
         }
     }
     result
@@ -179,154 +181,63 @@ const ERRATUM_PAGE_SIZE: usize = 4096;
 /// The number of instruction positions in one erratum page.
 const ERRATUM_INSN_OFFSETS: usize = ERRATUM_PAGE_SIZE / INSN_SIZE;
 
-type ErratumBits = BitArray<[usize; ERRATUM_INSN_OFFSETS / usize::BITS as usize]>;
-
 #[derive(Debug)]
-pub(crate) struct ErratumMask {
-    // Section start offsets within a page, in instruction units, that could trigger the erratum.
-    pub(crate) mask: Box<ErratumBits>,
-    // Section alignment in bytes.
-    pub(crate) alignment: usize,
+pub(crate) struct ErratumSectionInfo {
+    pub(crate) offsets: SmallVec<[ErratumOffset; 2]>,
     // Maximum padding in bytes needed to make any valid section placement safe.
     pub(crate) maximal_padding: usize,
 }
 
-impl ErratumMask {
-    pub(crate) fn padding_for_address(&self, address: u64) -> u64 {
-        let offset = (address as usize % ERRATUM_PAGE_SIZE) / INSN_SIZE;
-        // Page-aligned sections were already checked to be safe during analysis.
-        if self.alignment >= ERRATUM_PAGE_SIZE {
-            debug_assert!(!self.mask[offset]);
-            return 0;
-        }
-        let padding = INSN_SIZE
-            * find_erratum_shift(offset, self.alignment / INSN_SIZE, &self.mask)
-                .expect("erratum mask was checked for a safe placement");
-        debug_assert!(padding <= self.maximal_padding);
-        padding as u64
-    }
-}
-
-/// Returns the smallest alignment-multiple shift to a safe instruction offset.
-#[inline]
-fn find_erratum_shift(
-    offset_in_insns: usize,
-    alignment_in_insns: usize,
-    mask: &ErratumBits,
-) -> Option<usize> {
-    (0..(ERRATUM_INSN_OFFSETS / alignment_in_insns))
-        .map(|step| step * alignment_in_insns)
-        .find(|step| !mask[(offset_in_insns + *step) % ERRATUM_INSN_OFFSETS])
+/// Returns whether an ADRP offset, in instruction units, is safe from the erratum.
+fn is_safe_adrp_offset(offset: usize) -> bool {
+    let page_insn_offset = offset % ERRATUM_INSN_OFFSETS;
+    page_insn_offset != 0xff8 / INSN_SIZE && page_insn_offset != 0xffc / INSN_SIZE
 }
 
 fn erratum_mask_from_offset(
-    erratum_offsets: &[usize],
+    erratum_offsets: &[ErratumOffset],
     section_alignment: u64,
-) -> Result<Option<ErratumMask>> {
+    section_size: usize,
+) -> Result<Option<ErratumSectionInfo>> {
     let section_alignment = section_alignment as usize;
     if erratum_offsets.is_empty() {
         return Ok(None);
     }
 
-    // Set a bit for each section start offset that places an affected ADRP at an unsafe page
-    // offset.
-    let mut mask = ErratumBits::ZERO;
-    for section_start in 0..ERRATUM_INSN_OFFSETS {
-        if erratum_offsets.iter().any(|offset| {
-            let i = (*offset + section_start) % ERRATUM_INSN_OFFSETS;
-            i == 0xff8 / INSN_SIZE || i == 0xffc / INSN_SIZE
-        }) {
-            mask.set(section_start, true);
-        }
-    }
-
-    ensure!(
-        // Alignments of at least 4096 place the section at a page boundary, which must be safe.
-        section_alignment < ERRATUM_PAGE_SIZE || !mask[0],
-        "cannot fix erratum for a section with large alignment: {section_alignment}"
-    );
-
-    // For each unsafe, aligned section start offset, find the smallest alignment-multiple
-    // shift that moves all affected ADRP instructions away from unsafe page offsets.
     ensure!(
         section_alignment >= INSN_SIZE,
         "unexpected small alignment: {section_alignment}"
     );
-    let alignment_in_insns = section_alignment / INSN_SIZE;
-    let necessary_shifts = mask
-        .iter_ones()
-        // Consider only start offsets that satisfy the section alignment.
-        .filter(|i| i % alignment_in_insns == 0)
-        .map(|i| {
-            find_erratum_shift(i, alignment_in_insns, &mask)
-                .ok_or_else(|| error!("Cannot find a valid offset for an erratum"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let maximal_padding = INSN_SIZE * necessary_shifts.into_iter().max().unwrap_or(0);
+    let mut maximal_padding = 0;
 
-    Ok(Some(ErratumMask {
-        alignment: section_alignment,
-        mask: Box::new(mask),
+    // Take the worst case over every instruction-aligned page-relative section start,
+    // independently of the section's alignment or its eventual placement.
+    for section_start in 0..ERRATUM_INSN_OFFSETS {
+        let mut tail = section_size.div_ceil(INSN_SIZE);
+        for (variant, _) in erratum_offsets
+            .iter()
+            .filter(|(_, offset)| !is_safe_adrp_offset(*offset / INSN_SIZE + section_start))
+        {
+            while !is_safe_adrp_offset(section_start + tail) {
+                // Keep the relocated ADRP away from unsafe page offsets, including for later stubs.
+                tail += 1;
+            }
+            tail += variant.instruction_count() + 1;
+        }
+        maximal_padding = maximal_padding.max(tail * INSN_SIZE - section_size);
+    }
+
+    Ok(Some(ErratumSectionInfo {
+        offsets: SmallVec::from_slice(erratum_offsets),
         maximal_padding,
     }))
 }
 
-pub(crate) fn erratum_mask(data: &[u8], section_alignment: u64) -> Result<Option<ErratumMask>> {
+pub(crate) fn erratum_section_info(
+    data: &[u8],
+    section_alignment: u64,
+) -> Result<Option<ErratumSectionInfo>> {
     debug_assert!(section_alignment.is_power_of_two());
-    let erratum_offsets: SmallVec<[usize; 4]> = erratum_843419_offsets(data)
-        .into_iter()
-        .map(|offset| (offset % ERRATUM_PAGE_SIZE) / INSN_SIZE)
-        // We can use unique, but typically all the values as distinct.
-        .collect();
-    erratum_mask_from_offset(&erratum_offsets, section_alignment)
-}
-
-#[test]
-fn test_erratum_mask_from_offset() {
-    // Offsets are in instruction units; alignment and padding are in bytes.
-    let cases: &[(&[usize], u64, Option<usize>)] = &[
-        (&[], 4, None),
-        (&[], 4096, None),
-        (&[0], 4, Some(8)),
-        (&[0], 8, Some(8)),
-        (&[0], 16, Some(0)),
-        (&[1], 4, Some(8)),
-        (&[1022], 4, Some(8)),
-        (&[1022], 8, Some(8)),
-        (&[1022], 16, Some(16)),
-        (&[1023], 4, Some(8)),
-        (&[1023], 8, Some(8)),
-        (&[0, 2], 4, Some(16)),
-        (&[0, 2, 4], 4, Some(24)),
-        (&[0, 2, 4, 6], 4, Some(32)),
-        (&[0, 0], 4, Some(8)),
-        (&[1024], 4, Some(8)),
-        (&[0], 4096, Some(0)),
-        (&[0], 8192, Some(0)),
-    ];
-
-    for &(offsets, alignment, expected) in cases {
-        assert_eq!(
-            erratum_mask_from_offset(offsets, alignment)
-                .unwrap()
-                .map(|mask| mask.maximal_padding),
-            expected,
-            "offsets={offsets:?}, alignment={alignment}"
-        );
-    }
-
-    let error_cases: &[(&[usize], u64)] = &[
-        (&[0], 0),
-        (&[0], 1),
-        (&[0], 2),
-        (&[1022], 4096),
-        (&[1023], 8192),
-        (&[510, 1022], 2048),
-    ];
-    for &(offsets, alignment) in error_cases {
-        assert!(
-            erratum_mask_from_offset(offsets, alignment).is_err(),
-            "offsets={offsets:?}, alignment={alignment}"
-        );
-    }
+    let erratum_offsets = erratum_843419_offsets(data);
+    erratum_mask_from_offset(&erratum_offsets, section_alignment, data.len())
 }
