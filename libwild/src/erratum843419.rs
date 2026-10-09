@@ -217,7 +217,8 @@ fn erratum_mask_from_offset(
     // Take the worst case over every instruction-aligned page-relative section start,
     // independently of the section's alignment or its eventual placement.
     for section_start in 0..ERRATUM_INSN_OFFSETS {
-        let mut tail = section_size.div_ceil(INSN_SIZE);
+        // Reserve a branch over the veneer slots for sections that fall through, like .init/.fini.
+        let mut tail = section_size.div_ceil(INSN_SIZE) + 1;
         for (variant, _) in erratum_offsets
             .iter()
             .filter(|(_, offset)| !is_safe_adrp_offset(*offset / INSN_SIZE + section_start))
@@ -250,7 +251,13 @@ pub(crate) fn patch_erratum_sequences(
     offsets: &[ErratumOffset],
 ) -> Result<HashMap<u64, u64>> {
     let mut mapping = HashMap::new();
-    let mut tail = section_size;
+    ensure!(
+        section_size + INSN_SIZE <= out.len(),
+        "Insufficient space for branch over erratum slots"
+    );
+    // Fall-through must skip all reserved slots, including unused padding.
+    write_branch(out, section_size, out.len())?;
+    let mut tail = section_size + INSN_SIZE;
     for &(variant, offset) in offsets {
         if is_safe_adrp_offset((section_address as usize + offset) / INSN_SIZE) {
             continue;
@@ -285,7 +292,7 @@ pub(crate) fn patch_erratum_sequences(
         tail += size + INSN_SIZE;
     }
 
-    // Sections like .init/.fini need to be filled with NOPs.
+    // Fill unused tail padding with NOPs.
     for instruction in out[tail..].as_chunks_mut::<INSN_SIZE>().0 {
         *instruction = NOP_OPCODE.to_le_bytes();
     }
