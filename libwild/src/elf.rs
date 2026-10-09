@@ -11,7 +11,6 @@ use crate::bail;
 use crate::debug_assert_bail;
 use crate::elf_writer;
 use crate::ensure;
-use crate::erratum843419::ErratumOffset;
 use crate::erratum843419::erratum_section_info;
 use crate::error::Context as _;
 use crate::error::Result;
@@ -1148,7 +1147,10 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         args: &Self::Args,
         section: &mut layout::Section,
     ) -> Result {
-        if args.fix_cortex_a53_843419 && A::arch_identifier() == object::elf::EM_AARCH64 {
+        if args.fix_cortex_a53_843419
+            && !args.should_output_partial_object
+            && A::arch_identifier() == object::elf::EM_AARCH64
+        {
             let header = state.object.section(section_index)?;
             let bytes = state.object.section_data_cow(header)?;
             let alignment = state.object.section_alignment(header)?;
@@ -1158,7 +1160,6 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
                 tracing::trace!(erratum_info.maximal_padding, section = %state.object.section_display_name(section_index));
                 section.maximal_padding = u16::try_from(erratum_info.maximal_padding).unwrap();
                 state
-                    .format_specific
                     .erratum_offsets
                     .insert(section_index.0, erratum_info.offsets);
             }
@@ -4587,9 +4588,6 @@ pub(crate) struct ObjectLayoutStateExt<'data, C: ElfClass> {
     pub(crate) aarch64_build_attributes: Option<AArch64BuildAttributes>,
 
     has_eh_frame_input: bool,
-
-    // A section with an erratum is pretty rare, use HashMap.
-    pub(crate) erratum_offsets: HashMap<usize, SmallVec<[ErratumOffset; 2]>>,
 
     cies: SmallVec<[CieAtOffset<'data>; 2]>,
 

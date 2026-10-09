@@ -11,6 +11,7 @@ use crate::compression::CompressedSection;
 use crate::debug_assert_bail;
 use crate::diagnostics::SymbolInfoPrinter;
 use crate::ensure;
+use crate::erratum843419::ErratumOffset;
 use crate::error;
 use crate::error::Context;
 use crate::error::Error;
@@ -1176,6 +1177,9 @@ pub(crate) struct ObjectLayout<'data, P: Platform> {
 
     /// Whether this object is responsible for writing the thunks in its ThunkBlock.
     pub(crate) owns_thunk_block: bool,
+
+    /// AArch64 erratum identified for input sections.
+    pub(crate) erratum_offsets: HashMap<usize, SmallVec<[ErratumOffset; 2]>>,
 }
 
 #[derive(Debug)]
@@ -1599,6 +1603,9 @@ pub(crate) struct ObjectLayoutState<'data, P: Platform> {
     /// Total bytes of primary-function-part sections that survived GC. Used to help determine
     /// distances for range-extension thunks.
     pub(crate) post_gc_primary_bytes: u64,
+
+    // Sections with erratum sequences are rare, so use a sparse map.
+    pub(crate) erratum_offsets: HashMap<usize, SmallVec<[ErratumOffset; 2]>>,
 }
 
 #[derive(Debug, Default)]
@@ -4430,6 +4437,7 @@ fn new_object_layout_state<P: Platform>(
         thunk_block_id: ThunkBlockId::default(),
         owns_thunk_block: false,
         post_gc_primary_bytes: 0,
+        erratum_offsets: HashMap::new(),
     })
 }
 
@@ -4937,6 +4945,7 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
             section_relax_deltas: self.section_relax_deltas,
             thunk_block_id: self.thunk_block_id,
             owns_thunk_block: self.owns_thunk_block,
+            erratum_offsets: self.erratum_offsets,
         })
     }
 

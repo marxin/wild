@@ -13,7 +13,9 @@
 //! where the following instruction overwrites its destination register.
 
 use crate::Result;
+use crate::elf_aarch64::MIN_BRANCH_RANGE;
 use crate::ensure;
+use hashbrown::HashMap;
 use smallvec::SmallVec;
 
 const INSN_SIZE: usize = 4;
@@ -29,6 +31,8 @@ const ADD_IMM_OPCODE: u32 = 0x9100_0000;
 // Load/store register (unsigned immediate) (ARM Manual category of instructions)
 const LDR_STR_UNSIGNED_MASK: u32 = 0x3b00_0000;
 const LDR_STR_UNSIGNED_OPCODE: u32 = 0x3900_0000;
+const B_OPCODE: u32 = 0x1400_0000;
+const NOP_OPCODE: u32 = 0xd503201f;
 
 const REGISTER_MASK: u32 = (1 << 5) - 1;
 
@@ -54,7 +58,7 @@ pub(crate) enum ErratumVariant {
 pub(crate) type ErratumOffset = (ErratumVariant, usize);
 
 impl ErratumVariant {
-    fn instruction_count(&self) -> usize {
+    fn instruction_count(self) -> usize {
         match self {
             Self::Sequence1A => 4,
             Self::Sequence1B => 3,
@@ -73,7 +77,7 @@ impl ArmInsn {
 
     fn is_branch(insn: u32) -> bool {
         // B, BL
-        (insn & 0x7c000000) == 0x14000000
+        (insn & 0x7c000000) == B_OPCODE
            // B.cond and BC.cond
            || (insn & 0xff000000) == 0x54000000
            // CBZ, CBNZ
@@ -227,10 +231,67 @@ fn erratum_mask_from_offset(
         maximal_padding = maximal_padding.max(tail * INSN_SIZE - section_size);
     }
 
+    ensure!(
+        (section_size + maximal_padding) as u64 <= MIN_BRANCH_RANGE,
+        "Input section too large for erratum workaround code"
+    );
+
     Ok(Some(ErratumSectionInfo {
         offsets: SmallVec::from_slice(erratum_offsets),
         maximal_padding,
     }))
+}
+
+/// Copies affected sequences into reserved tail slots and maps each moved instruction's address.
+pub(crate) fn patch_erratum_sequences(
+    out: &mut [u8],
+    section_size: usize,
+    section_address: u64,
+    offsets: &[ErratumOffset],
+) -> Result<HashMap<u64, u64>> {
+    let mut mapping = HashMap::new();
+    let mut tail = section_size;
+    for &(variant, offset) in offsets {
+        if is_safe_adrp_offset((section_address as usize + offset) / INSN_SIZE) {
+            continue;
+        }
+        while !is_safe_adrp_offset((section_address as usize + tail) / INSN_SIZE) {
+            tail += INSN_SIZE;
+        }
+        let size = variant.instruction_count() * INSN_SIZE;
+        ensure!(
+            offset + size <= section_size,
+            "Erratum sequence exceeds section size"
+        );
+        ensure!(
+            tail + size + INSN_SIZE <= out.len(),
+            "Insufficient space for erratum slot"
+        );
+        // Copy erratum instructions to the tail slot.
+        out.copy_within(offset..offset + size, tail);
+        for instruction in (0..size).step_by(INSN_SIZE) {
+            mapping.insert(
+                section_address + (offset + instruction) as u64,
+                section_address + (tail + instruction) as u64,
+            );
+        }
+        // BR(veneer), NOP, NOP, [NOP]
+        write_branch(out, offset, tail)?;
+        for instruction in (offset + INSN_SIZE..offset + size).step_by(INSN_SIZE) {
+            out[instruction..instruction + INSN_SIZE].copy_from_slice(&NOP_OPCODE.to_le_bytes());
+        }
+        // BR(back after NOPS)
+        write_branch(out, tail + size, offset + size)?;
+        tail += size + INSN_SIZE;
+    }
+    Ok(mapping)
+}
+
+fn write_branch(out: &mut [u8], from: usize, to: usize) -> Result {
+    let displacement = u32::try_from(to - from)?;
+    out[from..from + INSN_SIZE]
+        .copy_from_slice(&(B_OPCODE | (displacement / INSN_SIZE as u32)).to_le_bytes());
+    Ok(())
 }
 
 pub(crate) fn erratum_section_info(
