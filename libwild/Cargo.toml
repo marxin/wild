@@ -14,7 +14,6 @@ linker-utils = { path = "../linker-utils", version = "0.10.0" }
 anyhow.workspace = true
 atomic-take.workspace = true
 bitflags.workspace = true
-bitvec.workspace = true
 blake3.workspace = true
 bumpalo-herd.workspace = true
 bytesize.workspace = true

@@ -284,11 +284,17 @@ pub(crate) fn patch_erratum_sequences(
         write_branch(out, tail + size, offset + size)?;
         tail += size + INSN_SIZE;
     }
+
+    // Sections like .init/.fini need to be filled with NOPs.
+    for instruction in out[tail..].as_chunks_mut::<INSN_SIZE>().0 {
+        *instruction = NOP_OPCODE.to_le_bytes();
+    }
+
     Ok(mapping)
 }
 
 fn write_branch(out: &mut [u8], from: usize, to: usize) -> Result {
-    let displacement = u32::try_from(to - from)?;
+    let displacement = u32::try_from(to.wrapping_sub(from) & 0x03ff_ffff)?;
     out[from..from + INSN_SIZE]
         .copy_from_slice(&(B_OPCODE | (displacement / INSN_SIZE as u32)).to_le_bytes());
     Ok(())
