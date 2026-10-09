@@ -212,13 +212,15 @@ fn erratum_mask_from_offset(
         section_alignment >= INSN_SIZE,
         "unexpected small alignment: {section_alignment}"
     );
-    let mut maximal_padding = 0;
+    let aligned_section_size = section_size.next_multiple_of(INSN_SIZE);
+    let alignment_padding = aligned_section_size - section_size;
+    let mut maximal_padding = alignment_padding;
 
     // Take the worst case over every instruction-aligned page-relative section start,
     // independently of the section's alignment or its eventual placement.
     for section_start in 0..ERRATUM_INSN_OFFSETS {
         // Reserve a branch over the veneer slots for sections that fall through, like .init/.fini.
-        let mut tail = section_size.div_ceil(INSN_SIZE) + 1;
+        let mut tail = aligned_section_size / INSN_SIZE + 1;
         for (variant, _) in erratum_offsets
             .iter()
             .filter(|(_, offset)| !is_safe_adrp_offset(*offset / INSN_SIZE + section_start))
@@ -229,7 +231,9 @@ fn erratum_mask_from_offset(
             }
             tail += variant.instruction_count() + 1;
         }
-        maximal_padding = maximal_padding.max(tail * INSN_SIZE - section_size);
+        // Include the bytes needed to align the skip branch, as well as the branch and veneers.
+        let padding = alignment_padding + (tail * INSN_SIZE - aligned_section_size);
+        maximal_padding = maximal_padding.max(padding);
     }
 
     ensure!(
@@ -251,13 +255,14 @@ pub(crate) fn patch_erratum_sequences(
     offsets: &[ErratumOffset],
 ) -> Result<HashMap<u64, u64>> {
     let mut mapping = HashMap::new();
+    let aligned_section_size = section_size.next_multiple_of(INSN_SIZE);
     ensure!(
-        section_size + INSN_SIZE <= out.len(),
+        aligned_section_size + INSN_SIZE <= out.len(),
         "Insufficient space for branch over erratum slots"
     );
     // Fall-through must skip all reserved slots, including unused padding.
-    write_branch(out, section_size, out.len())?;
-    let mut tail = section_size + INSN_SIZE;
+    write_branch(out, aligned_section_size, out.len())?;
+    let mut tail = aligned_section_size + INSN_SIZE;
     for &(variant, offset) in offsets {
         if is_safe_adrp_offset((section_address as usize + offset) / INSN_SIZE) {
             continue;
