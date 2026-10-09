@@ -656,15 +656,6 @@ pub(crate) trait Platform:
         Ok(())
     }
 
-    /// Leading padding needed at a known input-section allocation address.
-    fn input_section_padding<'data>(
-        _state: &Self::ObjectLayoutStateExt<'data>,
-        _section_index: object::SectionIndex,
-        _address: u64,
-    ) -> u16 {
-        0
-    }
-
     /// Calls `load_section_relocations` on `state` for the relocations in `section`.
     fn load_object_section_relocations<'data, 'scope, A: Arch<Platform = Self>>(
         state: &mut layout::ObjectLayoutState<'data, Self>,

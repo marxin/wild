@@ -1640,10 +1640,8 @@ pub(crate) struct Section {
     /// Size in the output. This starts as the input section size, then may be reduced by
     /// relaxation-induced byte deletions during `scan_relaxations`.
     pub(crate) size: u64,
-    /// Reserved space for address-dependent leading padding.
-    pub(crate) maximal_padding: u16,
-    /// Actual leading padding, selected once the final address is known.
-    pub(crate) leading_padding: u16,
+    /// Reserved space for section padding (used by AArch64 erratum).
+    pub(crate) maximal_padding: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3372,7 +3370,6 @@ impl Section {
         let section = Section {
             size,
             maximal_padding: 0,
-            leading_padding: 0,
         };
         Ok(section)
     }
@@ -4841,16 +4838,10 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
         let section_id_range = self.section_id_range;
         let object_part_ids = &resources.symbol_db.section_part_ids[section_id_range.as_usize()];
 
-        for (index, (slot, &part_id)) in self.sections.iter_mut().zip(object_part_ids).enumerate() {
+        for (slot, &part_id) in self.sections.iter_mut().zip(object_part_ids) {
             let resolution = match slot {
                 SectionSlot::Loaded(sec) => {
                     let address = memory_offsets.get(part_id);
-                    sec.leading_padding = P::input_section_padding(
-                        &self.format_specific,
-                        SectionIndex(index),
-                        address,
-                    );
-
                     // TODO: We probably need to be able to handle sections that are ifuncs and
                     // sections that need a TLS GOT struct.
                     *memory_offsets.get_mut(part_id) +=
@@ -4863,21 +4854,12 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
                         sframe_ranges.push(offset..offset + len);
                     }
 
-                    SectionResolution {
-                        address: address + u64::from(sec.leading_padding),
-                    }
+                    SectionResolution { address }
                 }
 
-                SectionSlot::Sorted(sec) => {
-                    sec.section.leading_padding = P::input_section_padding(
-                        &self.format_specific,
-                        SectionIndex(index),
-                        sec.address,
-                    );
-                    SectionResolution {
-                        address: sec.address + u64::from(sec.section.leading_padding),
-                    }
-                }
+                SectionSlot::Sorted(sec) => SectionResolution {
+                    address: sec.address,
+                },
 
                 &mut SectionSlot::LoadedDebugInfo(sec) => {
                     let address = memory_offsets.get(part_id);
@@ -5442,15 +5424,7 @@ fn compute_object_section_positions<'data, P: Platform>(
             SectionSlot::Loaded(sec) => {
                 let part_id = obj.section_part_id(sec_idx, &symbol_db.section_part_ids);
                 let address = offsets.get(part_id);
-                positions[sec_idx.0] = Some(InputSectionPosition {
-                    part_id,
-                    address: address
-                        + u64::from(P::input_section_padding(
-                            &obj.format_specific,
-                            sec_idx,
-                            address,
-                        )),
-                });
+                positions[sec_idx.0] = Some(InputSectionPosition { part_id, address });
                 *offsets.get_mut(part_id) += sec.capacity(part_id, output_sections);
             }
             SectionSlot::LoadedDebugInfo(sec) => {

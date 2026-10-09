@@ -1158,21 +1158,13 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
             let erratum_info = erratum_section_info(&bytes, alignment)?;
             if let Some(erratum_info) = erratum_info {
                 tracing::trace!(erratum_info.maximal_padding, section = %state.object.section_display_name(section_index));
-                section.maximal_padding = u16::try_from(erratum_info.maximal_padding).unwrap();
+                section.maximal_padding = u32::try_from(erratum_info.maximal_padding).unwrap();
                 state
                     .erratum_offsets
                     .insert(section_index.0, erratum_info.offsets);
             }
         }
         Ok(())
-    }
-
-    fn input_section_padding<'data>(
-        _state: &Self::ObjectLayoutStateExt<'data>,
-        _section_index: object::SectionIndex,
-        _address: u64,
-    ) -> u16 {
-        0
     }
 
     fn load_object_section_relocations<'data, 'scope, A: Arch<Platform = Self>>(
