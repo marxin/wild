@@ -275,12 +275,12 @@ pub(crate) fn patch_erratum_sequences(
                 section_address + (tail + instruction) as u64,
             );
         }
-        // BR(veneer), NOP, NOP, [NOP]
-        write_branch(out, offset, tail)?;
-        for instruction in (offset + INSN_SIZE..offset + size).step_by(INSN_SIZE) {
-            out[instruction..instruction + INSN_SIZE].copy_from_slice(&NOP_OPCODE.to_le_bytes());
+        // Preserve entry points inside the sequence: each original instruction branches to
+        // its corresponding relocated instruction, which executes the remaining suffix.
+        for instruction in (0..size).step_by(INSN_SIZE) {
+            write_branch(out, offset + instruction, tail + instruction)?;
         }
-        // BR(back after NOPS)
+        // Branch back to the instruction following the original sequence.
         write_branch(out, tail + size, offset + size)?;
         tail += size + INSN_SIZE;
     }
