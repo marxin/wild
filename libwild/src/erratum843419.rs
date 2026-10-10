@@ -206,7 +206,7 @@ fn is_safe_adrp_offset(offset: usize) -> bool {
     page_insn_offset != 0xff8 / INSN_SIZE && page_insn_offset != 0xffc / INSN_SIZE
 }
 
-fn erratum_mask_from_offset(
+fn find_errata_offsets(
     erratum_offsets: &[ErratumOffset],
     section_alignment: u64,
     section_size: usize,
@@ -365,5 +365,5 @@ pub(crate) fn erratum_section_info(
 ) -> Result<Option<ErratumSectionInfo>> {
     debug_assert!(section_alignment.is_power_of_two());
     let erratum_offsets = erratum_843419_offsets(data);
-    erratum_mask_from_offset(&erratum_offsets, section_alignment, data.len())
+    find_errata_offsets(&erratum_offsets, section_alignment, data.len())
 }

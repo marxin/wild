@@ -5423,8 +5423,10 @@ fn compute_object_section_positions<'data, P: Platform>(
         match slot {
             SectionSlot::Loaded(sec) => {
                 let part_id = obj.section_part_id(sec_idx, &symbol_db.section_part_ids);
-                let address = offsets.get(part_id);
-                positions[sec_idx.0] = Some(InputSectionPosition { part_id, address });
+                positions[sec_idx.0] = Some(InputSectionPosition {
+                    part_id,
+                    address: offsets.get(part_id),
+                });
                 *offsets.get_mut(part_id) += sec.capacity(part_id, output_sections);
             }
             SectionSlot::LoadedDebugInfo(sec) => {
