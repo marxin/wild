@@ -7,7 +7,8 @@
 //! immediately after an ADRP to the same register, might access an incorrect address.
 //!
 //! Workaround: Replace the final load/store in an affected sequence with a branch to a veneer
-//! that executes the load/store and branches back. Keep preceding PC-relative instructions in place.
+//! that executes the load/store and branches back. Keep preceding PC-relative instructions in
+//! place.
 //!
 //! Variant 2 is intentionally excluded because it involves a dead ADRP instruction:
 //! where the following instruction overwrites its destination register.
