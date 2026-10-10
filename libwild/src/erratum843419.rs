@@ -174,21 +174,6 @@ impl ArmInsn {
     }
 }
 
-/// Returns byte offsets of all potential erratum sequences in the instruction stream.
-pub(crate) fn erratum_843419_offsets(data: &[u8]) -> SmallVec<[ErratumOffset; 2]> {
-    let insns = data.as_chunks::<INSN_SIZE>().0;
-
-    // A busy loop where we intentionally use a plain loop as the Iterator abstraction
-    // is not zero cost.
-    let mut result = SmallVec::new();
-    for index in 0..insns.len().saturating_sub(2) {
-        if let Some(variant) = ArmInsn::starts_with_erratum_843419(&insns[index..]) {
-            result.push((variant, index * INSN_SIZE));
-        }
-    }
-    result
-}
-
 /// The erratum depends on the low 12 bits of the instruction address.
 const ERRATUM_PAGE_SIZE: usize = 4096;
 /// The number of instruction positions in one erratum page.
@@ -205,47 +190,6 @@ pub(crate) struct ErratumSectionInfo {
 fn is_safe_adrp_offset(offset: usize) -> bool {
     let page_insn_offset = offset % ERRATUM_INSN_OFFSETS;
     page_insn_offset != 0xff8 / INSN_SIZE && page_insn_offset != 0xffc / INSN_SIZE
-}
-
-fn find_errata_offsets(
-    erratum_offsets: &[ErratumOffset],
-    section_alignment: u64,
-    section_size: usize,
-) -> Result<Option<ErratumSectionInfo>> {
-    let section_alignment = section_alignment as usize;
-    if erratum_offsets.is_empty() {
-        return Ok(None);
-    }
-
-    ensure!(
-        section_alignment >= INSN_SIZE,
-        "unexpected small alignment: {section_alignment}"
-    );
-    let aligned_section_size = section_size.next_multiple_of(INSN_SIZE);
-    let alignment_padding = aligned_section_size - section_size;
-    let mut maximal_padding = alignment_padding;
-
-    // Take the worst case over every instruction-aligned page-relative section start,
-    // independently of the section's alignment or its eventual placement.
-    for section_start in 0..ERRATUM_INSN_OFFSETS {
-        let veneer_count = erratum_offsets
-            .iter()
-            .filter(|(_, offset)| !is_safe_adrp_offset(*offset / INSN_SIZE + section_start))
-            .count();
-        // Reserve a branch over the veneer slots for sections that fall through, like .init/.fini.
-        let padding = alignment_padding + INSN_SIZE + veneer_count * VENEER_SIZE;
-        maximal_padding = maximal_padding.max(padding);
-    }
-
-    ensure!(
-        (section_size + maximal_padding) as u64 <= MIN_BRANCH_RANGE,
-        "Input section too large for erratum workaround code"
-    );
-
-    Ok(Some(ErratumSectionInfo {
-        offsets: SmallVec::from_slice(erratum_offsets),
-        maximal_padding,
-    }))
 }
 
 enum MappingSymbol {
@@ -365,6 +309,51 @@ pub(crate) fn erratum_section_info(
     section_alignment: u64,
 ) -> Result<Option<ErratumSectionInfo>> {
     debug_assert!(section_alignment.is_power_of_two());
-    let erratum_offsets = erratum_843419_offsets(data);
-    find_errata_offsets(&erratum_offsets, section_alignment, data.len())
+
+    let insns = data.as_chunks::<INSN_SIZE>().0;
+
+    // A busy loop where we intentionally use a plain loop as the Iterator abstraction
+    // is not zero cost.
+    let mut erratum_offsets: SmallVec<[_; 2]> = SmallVec::new();
+    for index in 0..insns.len().saturating_sub(2) {
+        if let Some(variant) = ArmInsn::starts_with_erratum_843419(&insns[index..]) {
+            erratum_offsets.push((variant, index * INSN_SIZE));
+        }
+    }
+
+    let section_alignment = section_alignment as usize;
+    if erratum_offsets.is_empty() {
+        return Ok(None);
+    }
+
+    ensure!(
+        section_alignment >= INSN_SIZE,
+        "unexpected small alignment: {section_alignment}"
+    );
+    let section_size = data.len();
+    let aligned_section_size = section_size.next_multiple_of(INSN_SIZE);
+    let alignment_padding = aligned_section_size - section_size;
+    let mut maximal_padding = alignment_padding;
+
+    // Take the worst case over every instruction-aligned page-relative section start,
+    // independently of the section's alignment or its eventual placement.
+    for section_start in 0..ERRATUM_INSN_OFFSETS {
+        let veneer_count = erratum_offsets
+            .iter()
+            .filter(|(_, offset)| !is_safe_adrp_offset(*offset / INSN_SIZE + section_start))
+            .count();
+        // Reserve a branch over the veneer slots for sections that fall through, like .init/.fini.
+        let padding = alignment_padding + INSN_SIZE + veneer_count * VENEER_SIZE;
+        maximal_padding = maximal_padding.max(padding);
+    }
+
+    ensure!(
+        (section_size + maximal_padding) as u64 <= MIN_BRANCH_RANGE,
+        "Input section too large for erratum workaround code"
+    );
+
+    Ok(Some(ErratumSectionInfo {
+        offsets: erratum_offsets,
+        maximal_padding,
+    }))
 }
