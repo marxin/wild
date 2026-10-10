@@ -4,7 +4,9 @@
 //#LinkArgs:--no-gc-sections -T ./layout.ld
 //#RunEnabled:false
 //#DiffEnabled:false
+
 //#Config:without-fix:default
+
 //#Config:with-fix:default
 //#LinkArgs:--fix-cortex-a53-843419
 

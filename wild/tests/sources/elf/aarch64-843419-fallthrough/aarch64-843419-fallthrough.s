@@ -3,7 +3,9 @@
 //#ReferenceLinkers:bfd,lld
 //#Object:tail.s
 //#DiffEnabled:false
+
 //#Config:without-fix:default
+
 //#Config:with-fix:default
 //#LinkArgs:--fix-cortex-a53-843419
 

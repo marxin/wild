@@ -3,10 +3,13 @@
 //#ReferenceLinkers:bfd,lld
 //#LinkArgs:--no-relax --fix-cortex-a53-843419 -T ./layout.ld
 //#DiffEnabled:false
+
 //#Config:one-byte:default
 //#CompArgs:-Wa,--defsym,TRAILING_BYTES=1
+
 //#Config:two-bytes:default
 //#CompArgs:-Wa,--defsym,TRAILING_BYTES=2
+
 //#Config:three-bytes:default
 //#CompArgs:-Wa,--defsym,TRAILING_BYTES=3
 
