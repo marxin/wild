@@ -2594,7 +2594,7 @@ fn write_section_raw<'out, 'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
             }
         };
 
-        // AArch64 erratum is mutualy exclusive from architectures using relax relocations.
+        // AArch64 erratum is mutually exclusive from architectures using relax relocations.
         if let Some(offsets) = object.erratum_offsets.get(&section_index.0) {
             debug_assert!(!layout.args().should_output_partial_object());
             let address = object.section_resolutions[section_index.0]
