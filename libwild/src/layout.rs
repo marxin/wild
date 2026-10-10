@@ -506,6 +506,8 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>, F: FileSystem>(
         gdb_index_data,
         script_sorted_sections,
         partial_link,
+        erratum_patches: AtomicU64::new(0),
+        erratum_padding: AtomicU64::new(0),
     };
 
     P::maybe_compress_debug_sections::<A>(&mut layout)?;
@@ -854,6 +856,9 @@ pub struct Layout<'data, P: Platform> {
     pub(crate) script_sorted_sections: Vec<InputSortedSection>,
 
     pub(crate) partial_link: PartialLinkSingletons,
+
+    pub(crate) erratum_patches: AtomicU64,
+    pub(crate) erratum_padding: AtomicU64,
 }
 
 #[derive(Debug, Default)]

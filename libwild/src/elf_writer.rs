@@ -319,6 +319,16 @@ fn write_file_contents<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
         }
     }
 
+    let erratum_padding = layout.erratum_padding.load(Relaxed);
+    if erratum_padding > 0 {
+        tracing::debug!(
+            target: "metrics",
+            patches = layout.erratum_patches.load(Relaxed),
+            padding_bytes = erratum_padding,
+            "AArch64 erratum 843419 workaround"
+        );
+    }
+
     fill_padding(section_buffers);
 
     Ok(())
@@ -2607,7 +2617,11 @@ fn write_section_raw<'out, 'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
                 offsets,
                 object.object,
                 section_index,
+                &layout.erratum_patches,
             )?;
+            layout
+                .erratum_padding
+                .fetch_add(u64::from(sec.maximal_padding), Relaxed);
             Ok((out, instruction_mapping))
         } else {
             Ok((&mut out[..effective_size], HashMap::new()))

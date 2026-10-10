@@ -21,6 +21,8 @@ use crate::ensure;
 use crate::platform::ObjectFile;
 use hashbrown::HashMap;
 use smallvec::SmallVec;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::Relaxed;
 
 const INSN_SIZE: usize = 4;
 // The final load/store followed by a branch back to the original instruction stream.
@@ -210,6 +212,7 @@ pub(crate) fn patch_erratum_sequences<C: ElfClass>(
     offsets: &[ErratumOffset],
     object: &File<'_, C>,
     section_index: object::SectionIndex,
+    patch_count: &AtomicU64,
 ) -> Result<HashMap<u64, u64>> {
     let mut mapping = HashMap::new();
     let mut mapping_symbols = None;
@@ -275,6 +278,8 @@ pub(crate) fn patch_erratum_sequences<C: ElfClass>(
         write_branch(out, load_store_offset, tail)?;
         write_branch(out, tail + INSN_SIZE, load_store_offset + INSN_SIZE)?;
         tail += VENEER_SIZE;
+
+        patch_count.fetch_add(1, Relaxed);
     }
 
     // Fill unused tail padding with NOPs.
