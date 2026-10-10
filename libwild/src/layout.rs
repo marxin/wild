@@ -4737,7 +4737,7 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
             && resources.thunk_layout_builder.is_some()
             && part_id == config.primary_function_part_id
         {
-            self.post_gc_primary_bytes += section.size;
+            self.post_gc_primary_bytes += section.size + u64::from(section.maximal_padding);
         }
 
         let section_id = part_id.output_section_id::<P>();

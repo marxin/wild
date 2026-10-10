@@ -646,7 +646,17 @@ pub(crate) trait Platform:
         scope: &Scope<'scope>,
     ) -> Result;
 
-    /// Analyzes a live executable input section as it is loaded.
+    /// Analyzes executable input sections before the early thunk size check.
+    /// Returns reserved padding bytes.
+    fn analyze_unloaded_text_section<'data>(
+        _object: &mut crate::resolution::ResolvedObject<'data, Self>,
+        _section_index: object::SectionIndex,
+        _args: &Self::Args,
+    ) -> Result<u64> {
+        Ok(0)
+    }
+
+    /// Applies cached analysis to a live executable input section as it is loaded.
     fn analyze_text_section<'data, A: Arch<Platform = Self>>(
         _state: &mut layout::ObjectLayoutState<'data, Self>,
         _section_index: object::SectionIndex,
