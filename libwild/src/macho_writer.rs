@@ -159,7 +159,8 @@ pub(crate) fn write<'data, A: Arch<Platform = MachO>>(
             _ => 1,
         })
         // Using bridge ensures the parallel processing takes collection elements in order
-        // (prelude emits expensive Trie and epilogue is responsible for compact unwind info emission).
+        // (prelude emits expensive Trie and epilogue is responsible for compact unwind info
+        // emission).
         .par_bridge()
         .try_for_each(|(group, mut buffers)| -> Result {
             verbose_timing_phase!("Write group");
