@@ -125,7 +125,7 @@ use object::macho::Tool;
 use object::slice_from_bytes_mut;
 use object::write::macho::CodeDirectory;
 use object::write::macho::CodeSignatureEncoder;
-use rayon::iter::IntoParallelIterator;
+use rayon::iter::ParallelBridge;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 use sha2::Digest;
@@ -153,7 +153,14 @@ pub(crate) fn write<'data, A: Arch<Platform = MachO>>(
     let mut writable_buckets = split_buffers_by_alignment(&mut section_buffers, layout);
     let groups_and_buffers = split_output_by_group(layout, &mut writable_buckets);
     groups_and_buffers
-        .into_par_iter()
+        .into_iter()
+        .sorted_by_key(|(group, _)| match group.files[0] {
+            FileLayout::Prelude(_) | FileLayout::Epilogue(_) => 0,
+            _ => 1,
+        })
+        // Using bridge ensures the parallel processing takes collection elements in order
+        // (prelude emits expensive Trie and epilogue is responsible for compact unwind info emission).
+        .par_bridge()
         .try_for_each(|(group, mut buffers)| -> Result {
             verbose_timing_phase!("Write group");
 
