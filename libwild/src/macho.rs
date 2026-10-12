@@ -86,6 +86,7 @@ use object::read::macho::MachHeader;
 use object::read::macho::Nlist;
 use object::read::macho::Section;
 use object::read::macho::Segment;
+use rayon::slice::ParallelSliceMut;
 use std::borrow::Cow;
 use std::mem::offset_of;
 use std::num::NonZeroU8;
@@ -1751,7 +1752,7 @@ impl platform::Platform for MachO {
             });
         }
 
-        fixups.sort_unstable_by_key(|fixup| fixup.address);
+        fixups.par_sort_unstable_by_key(|fixup| fixup.address);
         layout_ext.fixups = fixups;
         Ok(layout_ext)
     }
