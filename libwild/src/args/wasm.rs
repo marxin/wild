@@ -44,6 +44,7 @@ pub struct WasmArgs {
     pub(crate) export_symbols: Vec<String>,
     pub(crate) required_export_symbols: Vec<String>,
     pub(crate) extra_features: Vec<String>,
+    pub(crate) check_features: bool,
     pub(crate) export_memory: Option<String>,
     pub(crate) z_stack_size: u32,
     // Since LLVM 22, the default option is true.
@@ -59,6 +60,8 @@ pub struct WasmArgs {
     pub(crate) shared_memory: bool,
     // `(module, name)` to import the linear memory from, if `--import-memory` was given.
     pub(crate) import_memory: Option<(String, String)>,
+    // Export all defined, non-hidden symbols (`--export-dynamic`).
+    pub(crate) export_dynamic: bool,
     pub(crate) gc_sections: bool,
     pub(crate) allow_undefined: bool,
     pub(crate) allow_multiple_definition: bool,
@@ -92,6 +95,7 @@ impl Default for WasmArgs {
             common: CommonArgs::default(),
             lib_search_path: Vec::new(),
             extra_features: Vec::new(),
+            check_features: true,
             export_symbols: Vec::new(),
             required_export_symbols: Vec::new(),
             z_stack_size: DEFAULT_STACK_SIZE,
@@ -102,6 +106,7 @@ impl Default for WasmArgs {
             shared_memory: false,
             import_memory: None,
             export_memory: None,
+            export_dynamic: false,
             gc_sections: true,
             allow_undefined: false,
             allow_multiple_definition: false,
@@ -155,7 +160,7 @@ impl platform::Args for WasmArgs {
     }
 
     fn should_export_all_dynamic_symbols(&self) -> bool {
-        todo!()
+        self.export_dynamic
     }
 
     fn should_export_dynamic(&self, _lib_name: &[u8]) -> bool {
@@ -253,6 +258,24 @@ fn setup_argument_parser() -> ArgumentParser<WasmArgs> {
 
     parser
         .declare()
+        .long("whole-archive")
+        .help("Force load of all members in a static library")
+        .execute(|_args, modifier_stack| {
+            modifier_stack.last_mut().unwrap().whole_archive = true;
+            Ok(())
+        });
+
+    parser
+        .declare()
+        .long("no-whole-archive")
+        .help("Do not force load of all members in a static library (default)")
+        .execute(|_args, modifier_stack| {
+            modifier_stack.last_mut().unwrap().whole_archive = false;
+            Ok(())
+        });
+
+    parser
+        .declare()
         .long("gc-sections")
         .help("Enable removal of unused sections (default)")
         .execute(|args, _modifier_stack| {
@@ -299,6 +322,25 @@ fn setup_argument_parser() -> ArgumentParser<WasmArgs> {
         });
 
     parser
+        .declare()
+        .long("export-dynamic")
+        .short("E")
+        .help("Put symbols in the dynamic symbol table")
+        .execute(|args, _modifier_stack| {
+            args.export_dynamic = true;
+            Ok(())
+        });
+
+    parser
+        .declare()
+        .long("no-export-dynamic")
+        .help("Do not put symbols in the dynamic symbol table (default)")
+        .execute(|args, _modifier_stack| {
+            args.export_dynamic = false;
+            Ok(())
+        });
+
+    parser
         .declare_with_param()
         .long("extra-features")
         .help("Comma-separated list of features to add to the default set of features inferred from input objects")
@@ -308,6 +350,24 @@ fn setup_argument_parser() -> ArgumentParser<WasmArgs> {
                 .filter(|feature| !feature.is_empty())
                 .map(str::to_owned)
                 .collect();
+            Ok(())
+        });
+
+    parser
+        .declare()
+        .long("check-features")
+        .help("Check feature compatibility of linked objects (default)")
+        .execute(|args, _modifier_stack| {
+            args.check_features = true;
+            Ok(())
+        });
+
+    parser
+        .declare()
+        .long("no-check-features")
+        .help("Ignore feature compatibility of linked objects")
+        .execute(|args, _modifier_stack| {
+            args.check_features = false;
             Ok(())
         });
 

@@ -3,6 +3,7 @@
 use crate::verbose_timing_phase;
 use leb128::write::unsigned_len as uleb128_size;
 use object::macho;
+use rayon::slice::ParallelSliceMut;
 use std::ops::Range;
 
 #[derive(Debug, Clone, Copy)]
@@ -46,7 +47,7 @@ impl Trie {
             .collect::<Vec<_>>();
         {
             verbose_timing_phase!("Sort trie symbols");
-            names.sort_unstable_by(|a, b| a.1.cmp(b.1));
+            names.par_sort_unstable_by_key(|&(_, name)| name);
         }
 
         debug_assert!(
