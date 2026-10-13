@@ -23,6 +23,7 @@ use crate::grouping::Group;
 use crate::grouping::SequencedLinkerScript;
 use crate::input_data::InputBytes;
 use crate::input_data::InputRef;
+use crate::input_section_id::InputSectionIndex;
 use crate::layout;
 use crate::layout::CommonGroupState;
 use crate::layout::DynamicSymbolDefinition;
@@ -1159,7 +1160,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
                 object
                     .format_specific
                     .erratum_sections
-                    .insert(section_index.0, info);
+                    .insert(section_index.into(), info);
                 return Ok(padding);
             }
         }
@@ -1172,11 +1173,8 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         _args: &Self::Args,
         section: &mut layout::Section,
     ) -> Result {
-        if let Some(info) = state
-            .format_specific
-            .erratum_sections
-            .remove(&section_index.0)
-        {
+        let section_id: InputSectionIndex = section_index.into();
+        if let Some(info) = state.format_specific.erratum_sections.remove(&section_id) {
             tracing::trace!(info.maximal_padding, section = %state.object.section_display_name(section_index));
             section.maximal_padding = u32::try_from(info.maximal_padding).unwrap();
             state.erratum_offsets.insert(section_index.0, info.offsets);
@@ -4611,7 +4609,7 @@ pub(crate) struct ObjectLayoutStateExt<'data, C: ElfClass> {
 
     pub(crate) debug_index_sections: Vec<InputDebugIndexSection<'data>>,
 
-    erratum_sections: HashMap<usize, ErratumSectionInfo>,
+    erratum_sections: HashMap<InputSectionIndex, ErratumSectionInfo>,
 }
 
 #[derive(Debug)]
@@ -7147,7 +7145,7 @@ impl<C: ElfClass> Resolution<Elf<C>> {
 #[derive(Debug, Default)]
 pub(crate) struct ResolvedObjectExt<'data> {
     debug_index_sections: Vec<InputDebugIndexSection<'data>>,
-    erratum_sections: HashMap<usize, ErratumSectionInfo>,
+    erratum_sections: HashMap<InputSectionIndex, ErratumSectionInfo>,
 }
 
 /// Rules that map input sections to built-in output sections when no linker script is in use.
