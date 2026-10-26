@@ -2886,6 +2886,7 @@ fn process_relocation<'data, 'scope, A: platform::Arch<Platform = MachO>>(
             object,
             &rel_info,
             local_sym_index,
+            section_index,
             is_unwind_personality,
             resources,
         )?;
@@ -2928,6 +2929,7 @@ fn classify_symbol_relocation<'data, A: platform::Arch<Platform = MachO>>(
     object: &layout::ObjectLayoutState<'data, MachO>,
     rel_info: &RelocationInfo,
     local_sym_index: SymbolIndex,
+    section_index: object::SectionIndex,
     is_unwind_personality: bool,
     resources: &layout::GraphResources<'data, '_, MachO>,
 ) -> Result<ClassifiedSymbolRelocation> {
@@ -2964,6 +2966,10 @@ fn classify_symbol_relocation<'data, A: platform::Arch<Platform = MachO>>(
     };
 
     if is_dynamic_library(&symbol_db.file(symbol_db.file_id_for_symbol(symbol_id))) {
+        ensure!(
+            !matches!(object.sections[section_index.0], SectionSlot::InitFunc(_)),
+            "Mach-O initializer is defined externally"
+        );
         match rel_info.r_type {
             object::macho::ARM64_RELOC_BRANCH26 => {
                 // TODO: classify symbols more reliably, likely by checking whether their
