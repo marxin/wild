@@ -1,5 +1,6 @@
 //#LinkerDriver:clang
 //#Shared:initializer.c
+//#ReferenceLinkers:ld
 //#ExpectErrorWild:Mach-O initializer is defined externally
 
 void imported_initializer(void);
