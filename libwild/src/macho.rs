@@ -1268,7 +1268,6 @@ impl platform::Platform for MachO {
     /// LOAD_COMMANDS, etc.) are not.
     type SectionIdentityExt = Option<SegmentName>;
 
-    const HAS_NULL_SYMBOL_ENTRY: bool = true;
     const EXPORT_LIST_RESTRICTS_DEFAULT_EXPORTS: bool = true;
 
     fn parse_export_list(
