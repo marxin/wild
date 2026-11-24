@@ -8,6 +8,7 @@ use crate::bail;
 use crate::error::Context as _;
 use crate::error::Result;
 use crate::glob_match::GlobPatternType;
+use crate::glob_match::Pattern;
 use crate::glob_match::analyze_glob_pattern;
 use crate::glob_match::compile_glob_pattern;
 use crate::glob_match::unescape_pattern;
@@ -17,7 +18,6 @@ use crate::input_data::ScriptData;
 use crate::linker_script::skip_comments_and_whitespace;
 use crate::symbol::UnversionedSymbolName;
 use crate::timing_phase;
-use glob::Pattern;
 use hashbrown::HashMap;
 use hashbrown::HashSet;
 use symbolic_demangle::Demangle;
@@ -83,7 +83,7 @@ pub(crate) enum SymbolMatcher<'data> {
     // Exact match.
     Exact(&'data [u8]),
     // Exact match with escape sequences that need unescaping.
-    EscapedExact(&'data [u8]),
+    EscapedExact(Vec<u8>),
     // A glob pattern with a '*' token.
     StarGlob(Pattern),
     // A glob pattern without any '*' token.
@@ -119,8 +119,7 @@ impl<'data> BasicMatchRules<'data> {
                 self.exact.insert(UnversionedSymbolName::prehashed(exact));
             }
             SymbolMatcher::EscapedExact(escaped) => {
-                let unescaped = unescape_pattern(escaped);
-                self.escaped_exact.insert(unescaped);
+                self.escaped_exact.insert(escaped);
             }
         }
     }
@@ -709,23 +708,27 @@ pub(crate) fn parse_matcher<'data>(
         } else {
             let glob_type = analyze_glob_pattern(token);
 
-            let create_pattern = |token: &[u8]| -> winnow::Result<Pattern> {
-                compile_glob_pattern(token).map_err(|e| {
-                    ContextError::from_external_error(
-                        input,
-                        match e {
-                            "Invalid UTF-8 string" => VersionScriptError::InvalidUtf8String,
-                            _ => VersionScriptError::InvalidGlobPattern,
-                        },
-                    )
-                })
+            let glob_error = |e| {
+                ContextError::from_external_error(
+                    input,
+                    match e {
+                        "Invalid UTF-8 string" => VersionScriptError::InvalidUtf8String,
+                        _ => VersionScriptError::InvalidGlobPattern,
+                    },
+                )
             };
 
             match glob_type {
                 GlobPatternType::Exact => SymbolMatcher::Exact(token),
-                GlobPatternType::EscapedExact => SymbolMatcher::EscapedExact(token),
-                GlobPatternType::Star => SymbolMatcher::StarGlob(create_pattern(token)?),
-                GlobPatternType::NonStar => SymbolMatcher::NonstarGlob(create_pattern(token)?),
+                GlobPatternType::EscapedExact => {
+                    SymbolMatcher::EscapedExact(unescape_pattern(token).map_err(glob_error)?)
+                }
+                GlobPatternType::Star => {
+                    SymbolMatcher::StarGlob(compile_glob_pattern(token).map_err(glob_error)?)
+                }
+                GlobPatternType::NonStar => {
+                    SymbolMatcher::NonstarGlob(compile_glob_pattern(token).map_err(glob_error)?)
+                }
             }
         },
     ))

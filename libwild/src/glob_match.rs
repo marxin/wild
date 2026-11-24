@@ -1,4 +1,7 @@
-use glob::Pattern;
+use globset::GlobBuilder;
+use globset::GlobMatcher;
+use regex_syntax::hir::HirKind;
+use regex_syntax::hir::Look;
 use std::str;
 pub(crate) enum GlobPatternType {
     Exact,
@@ -40,183 +43,62 @@ pub(crate) fn analyze_glob_pattern(pattern: &[u8]) -> GlobPatternType {
     pattern_type
 }
 
-#[derive(Clone, Copy)]
-enum Unescape {
-    /// Keep the escaped byte as itself. The result is compared literally.
-    Literal,
-    /// Quote `* ? [ ]` as a one-character class.
-    QuoteGlobMeta,
-}
+#[derive(Clone, Debug)]
+pub(crate) struct Pattern(GlobMatcher);
 
-pub(crate) fn unescape_pattern(pattern: &[u8]) -> Vec<u8> {
-    rewrite_escapes(pattern, Unescape::Literal)
-}
-
-fn rewrite_escapes(pattern: &[u8], mode: Unescape) -> Vec<u8> {
-    let quote = matches!(mode, Unescape::QuoteGlobMeta);
-    let mut result = Vec::with_capacity(pattern.len());
-    let mut i = 0;
-    while i < pattern.len() {
-        if pattern[i] != b'\\' {
-            if quote
-                && pattern[i] == b'['
-                && let Some((negate, members, consumed)) = parse_bracket(&pattern[i..])
-            {
-                result.extend(render_bracket(negate, &members));
-                i += consumed;
-                continue;
-            }
-            result.push(pattern[i]);
-            i += 1;
-            continue;
-        }
-
-        let Some(escaped) = pattern.get(i + 1).copied() else {
-            result.push(b'\\');
-            break;
-        };
-        i += 2;
-        if quote && matches!(escaped, b'*' | b'?' | b'[' | b']') {
-            // `glob::Pattern` does not treat `\` as an escape. A one-character
-            // class is the supported way to match these bytes literally.
-            result.extend_from_slice(&[b'[', escaped, b']']);
-        } else {
-            result.push(escaped);
-        }
-    }
-    result
-}
-
-fn parse_bracket(input: &[u8]) -> Option<(bool, [bool; 256], usize)> {
-    if input.first() != Some(&b'[') {
-        return None;
-    }
-    let mut i = 1;
-    // The glob crate only treats `!` as negation, not `^`.
-    // https://github.com/rust-lang/glob/issues/116
-    let negate = matches!(input.get(i), Some(b'!' | b'^'));
-    if negate {
-        i += 1;
-    }
-
-    let mut members = [false; 256];
-    let mut c = *input.get(i)?;
-    i += 1;
-    loop {
-        if c == b'\\' {
-            c = *input.get(i)?;
-            i += 1;
-        }
-        let start = c;
-        let range =
-            input.get(i) == Some(&b'-') && matches!(input.get(i + 1), Some(n) if *n != b']');
-        if range {
-            i += 1;
-            let mut end = *input.get(i)?;
-            i += 1;
-            if end == b'\\' {
-                end = *input.get(i)?;
-                i += 1;
-            }
-            if start <= end {
-                for byte in start..=end {
-                    members[byte as usize] = true;
-                }
-            }
-        } else {
-            members[start as usize] = true;
-        }
-
-        c = *input.get(i)?;
-        i += 1;
-        if c == b']' {
-            return Some((negate, members, i));
-        }
+impl PartialEq for Pattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.glob() == other.0.glob()
     }
 }
 
-fn render_bracket(negate: bool, members: &[bool; 256]) -> Vec<u8> {
-    let any = members.iter().any(|member| *member);
-    if !any {
-        // An empty range matches nothing. Negated, it matches any one byte.
-        return if negate {
-            vec![b'?']
-        } else {
-            b"[z-a]".to_vec()
-        };
-    }
-    if !negate && members[b'!' as usize] && members.iter().filter(|member| **member).count() == 1 {
-        return vec![b'!'];
+impl Eq for Pattern {}
+
+impl Pattern {
+    #[cfg(test)]
+    pub(crate) fn as_str(&self) -> &str {
+        self.0.glob().glob()
     }
 
-    let mut body = Vec::new();
-    if members[b']' as usize] {
-        body.push(b']');
+    pub(crate) fn matches(&self, name: &str) -> bool {
+        self.0.is_match(name)
     }
-    for byte in 0u8..=255 {
-        if members[byte as usize] && !matches!(byte, b']' | b'!' | b'-') {
-            body.push(byte);
-        }
-    }
-    let has_bang = members[b'!' as usize];
-    let has_dash = members[b'-' as usize];
-    if !negate && body.is_empty() && has_bang && has_dash {
-        body.extend_from_slice(b"-!");
-    } else if has_bang {
-        body.push(b'!');
-        if has_dash {
-            body.push(b'-');
-        }
-    } else if has_dash {
-        body.push(b'-');
-    }
+}
 
-    let mut out = Vec::with_capacity(body.len() + 3);
-    out.push(b'[');
-    if negate {
-        out.push(b'!');
+fn parse_glob(token: &[u8], escapes: bool) -> Result<globset::Glob, &'static str> {
+    GlobBuilder::new(str::from_utf8(token).map_err(|_| "Invalid UTF-8 string")?)
+        .backslash_escape(escapes)
+        .build()
+        .map_err(|_| "Invalid Glob Pattern")
+}
+
+pub(crate) fn unescape_pattern(pattern: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let glob = parse_glob(pattern, true)?;
+    let hir = regex_syntax::ParserBuilder::new()
+        .utf8(false)
+        .build()
+        .parse(glob.regex())
+        .map_err(|_| "Invalid glob pattern")?;
+    let HirKind::Concat(parts) = hir.kind() else {
+        return Err("Expected literal glob");
+    };
+    let mut bytes = Vec::new();
+    for part in parts {
+        match part.kind() {
+            HirKind::Look(Look::Start | Look::End) => (),
+            HirKind::Literal(literal) => bytes.extend_from_slice(&literal.0),
+            _ => return Err("Expected literal glob"),
+        }
     }
-    out.extend(body);
-    out.push(b']');
-    out
+    Ok(bytes)
 }
 
 pub(crate) fn compile_glob_pattern(token: &[u8]) -> Result<Pattern, &'static str> {
-    let pattern = rewrite_escapes(token, Unescape::QuoteGlobMeta);
-    let pattern = str::from_utf8(&pattern).map_err(|_| "Invalid UTF-8 string")?;
-    Pattern::new(pattern).map_err(|_| "Invalid Glob Pattern")
+    Ok(Pattern(parse_glob(token, true)?.compile_matcher()))
 }
 
-/// Normalizes repeated stars to a single wildcard outside character classes. Mach-O symbol
-/// patterns do not use the glob crate's directory-recursion syntax, and backslashes are literal.
 pub(crate) fn compile_macho_glob_pattern(token: &[u8]) -> Result<Pattern, &'static str> {
-    let mut normalized = Vec::with_capacity(token.len());
-    let mut bytes = token.iter().copied().peekable();
-
-    while let Some(byte) = bytes.next() {
-        normalized.push(byte);
-
-        match byte {
-            b'*' => while bytes.next_if_eq(&b'*').is_some() {},
-            b'[' => {
-                // Preserve character classes as-is.
-                normalized.extend(bytes.next_if(|byte| matches!(byte, b'!' | b'^')));
-                // A leading `]` (after any negation) is a literal member of the class.
-                normalized.extend(bytes.next());
-                for byte in bytes.by_ref() {
-                    normalized.push(byte);
-                    if byte == b']' {
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let pattern = str::from_utf8(&normalized).map_err(|_| "Invalid UTF-8 string")?;
-    let pattern = pattern.replace("[^", "[!");
-    Pattern::new(pattern.as_str()).map_err(|_| "Invalid Glob Pattern")
+    Ok(Pattern(parse_glob(token, false)?.compile_matcher()))
 }
 
 #[cfg(test)]

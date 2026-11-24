@@ -7,6 +7,7 @@ use crate::error::Context;
 use crate::error::Result;
 use crate::expression_eval::evaluate_const;
 use crate::glob_match::GlobPatternType;
+use crate::glob_match::Pattern;
 use crate::glob_match::analyze_glob_pattern;
 use crate::glob_match::compile_glob_pattern;
 use crate::glob_match::unescape_pattern;
@@ -30,7 +31,6 @@ use crate::parsing::SymbolPlacement;
 use crate::platform::Args as _;
 use crate::platform::Platform;
 use crate::platform::SectionHeader;
-use glob::Pattern;
 use hashbrown::HashTable;
 use std::borrow::Cow;
 
@@ -587,7 +587,7 @@ impl<'data> SectionRule<'data> {
         let name_matcher = match analyze_glob_pattern(pattern) {
             GlobPatternType::Exact => SectionNameMatcher::Exact(Cow::Borrowed(pattern)),
             GlobPatternType::EscapedExact => {
-                SectionNameMatcher::Exact(Cow::Owned(unescape_pattern(pattern)))
+                SectionNameMatcher::Exact(Cow::Owned(unescape_pattern(pattern)?))
             }
             GlobPatternType::Star | GlobPatternType::NonStar => {
                 let compiled_pattern = compile_glob_pattern(pattern)?;
